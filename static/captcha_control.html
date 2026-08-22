@@ -148,7 +148,7 @@
 
   // move 事件节流：弱机上每次 move 都会触发服务端截图，太密会拖垮
   let lastMoveSent = 0;
-  const MOVE_INTERVAL = 60;
+  const MOVE_INTERVAL = 30;
 
   let dragging = false;
   wrap.addEventListener('mousedown', (ev) => {

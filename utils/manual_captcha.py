@@ -247,6 +247,8 @@ async def open_manual_session(
             logger.warning(f"【{cookie_id}】导航惩罚页失败: {exc}")
         # 给验证组件一点渲染时间，否则截图可能是空白
         await asyncio.sleep(2)
+        # Windows 指纹伪装：主页面 + 已加载的 iframe
+        await browser_limit.apply_windows_fingerprint(page)
 
         # 等滑块真正出现再建会话 —— 找不到滑块说明 x5secdata 已失效，
         # 此时即使建了会话也拖不出结果，尽早告知用户更合适。
@@ -277,6 +279,11 @@ async def open_manual_session(
         completed = False
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
+            # 滑块 iframe 晚加载，周期性补指纹伪装
+            try:
+                await browser_limit.apply_windows_fingerprint(page)
+            except Exception:
+                pass
             try:
                 if await captcha_controller.check_completion(session_id):
                     completed = True

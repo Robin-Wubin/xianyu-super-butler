@@ -40,6 +40,112 @@ _ACQUIRE_TIMEOUT = 300
 _LAUNCH_TIMEOUT = 180
 
 
+# ==================== Windows 指纹伪装 ====================
+# 背景：容器里的浏览器是 Linux(aarch64) Chromium，闲鱼风控眼里
+# 「Linux 桌面用户」是极小众群体，本身就有风险加权；且官方 Chrome
+# 不出 ARM Linux 版，「装真 Chrome」这条路走不通。
+# 因此统一伪装成 Windows Chrome，且伪装必须全套一致：
+#   1. UA 版本号与实际 Chromium 大版本对齐（Sec-CH-UA 头由二进制生成，
+#      版本对不上就是自相矛盾的检测信号）；
+#   2. navigator.platform / userAgentData / WebGL 渲染器等 JS 指纹同步伪装；
+#   3. locale/timezone 中文环境（launch 时已统一注入）。
+# 关闭方式：环境变量 BROWSER_FAKE_WINDOWS_UA=false
+_chromium_major_cache: Optional[int] = None
+
+
+def _detect_chromium_major(playwright) -> Optional[int]:
+    """探测已安装 Chromium 的大版本号（结果缓存）。"""
+    global _chromium_major_cache
+    if _chromium_major_cache:
+        return _chromium_major_cache
+    try:
+        import subprocess as _sp
+        exe = str(playwright.chromium.executable_path)
+        # patchright 可能指向软链目录，找不到就直接查 chrome 二进制
+        out = _sp.run([exe, '--version'], capture_output=True, text=True, timeout=20)
+        import re as _re
+        m = _re.search(r'(\d+)\.', out.stdout or '')
+        if m:
+            _chromium_major_cache = int(m.group(1))
+            return _chromium_major_cache
+    except Exception:
+        pass
+    return None
+
+
+def _fake_windows_ua(playwright) -> Optional[str]:
+    if os.environ.get('BROWSER_FAKE_WINDOWS_UA', 'true').strip().lower() == 'false':
+        return None
+    major = _detect_chromium_major(playwright) or 136
+    return (
+        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
+# 与 UA 配套的 JS 层指纹伪装。只覆盖「与 UA 矛盾」的字段，
+# 不碰 webdriver/plugins 等（patchright 已处理，重复修改反而露馅）。
+_WIN_FINGERPRINT_JS = r"""
+(() => {
+  const major = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
+  if (!major) return;
+  // navigator.* 属性挂在原型上，实例级 defineProperty 不一定生效
+  const def = (obj, key, getter) => {
+    for (const target of [obj, Object.getPrototypeOf(obj)]) {
+      try { Object.defineProperty(target, key, {get: getter, configurable: true}); return true; } catch (e) {}
+    }
+    return false;
+  };
+  def(navigator, 'platform', () => 'Win32');
+  try {
+    if (navigator.userAgentData) {
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: () => ({
+          brands: [
+            {brand: 'Chromium', version: major},
+            {brand: 'Not A(Brand', version: '99'},
+            {brand: 'Google Chrome', version: major},
+          ],
+          mobile: false,
+          platform: 'Windows',
+          getHighEntropyValues: (hints) => Promise.resolve({
+            platform: 'Windows', platformVersion: '15.0.0',
+            architecture: 'x86', bitness: '64',
+            uaFullVersion: major + '.0.0.0',
+            model: '', fullVersionList: [
+              {brand: 'Chromium', version: major + '.0.0.0'},
+              {brand: 'Not A(Brand', version: '99.0.0.0'},
+              {brand: 'Google Chrome', version: major + '.0.0.0'},
+            ],
+          }),
+        }), configurable: true,
+      });
+    }
+  } catch (e) {}
+  try {
+    // 37445/37446 是 WEBGL_debug_renderer_info 扩展的常量，
+    // 未启用扩展时返回 None —— 直接拦 getParameter 的这两个参数即可
+    const getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (p) {
+      if (p === 37445) return 'Google Inc. (Intel)';
+      if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E92) Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      return getParam.apply(this, arguments);
+    };
+    const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function (p) {
+      if (p === 37445) return 'Google Inc. (Intel)';
+      if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E92) Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      return getParam2.apply(this, arguments);
+    };
+  } catch (e) {}
+  try {
+    def(navigator, 'hardwareConcurrency', () => 8);
+    def(navigator, 'deviceMemory', () => 8);
+  } catch (e) {}
+})();
+"""
+
+
 def _detect_total_memory_gb() -> Optional[float]:
     """物理内存（GB）。取不到时返回 None，由调用方只按 CPU 判断。"""
     try:
@@ -199,7 +305,18 @@ async def launch_browser(
             args = list(opts.get('args') or [])
             if '--lang=zh-CN' not in args:
                 args.append('--lang=zh-CN')
+            # Chrome 137+ 无 GPU 环境默认禁用 WebGL（防指纹），会导致
+            # 「正常电脑必有 WebGL」的检测露馅；显式启用软件渲染
+            if '--enable-unsafe-swiftshader' not in args:
+                args.append('--enable-unsafe-swiftshader')
             opts['args'] = args
+            # Windows 指纹伪装（调用方未显式指定 UA 时）
+            _inject_fp = False
+            if not opts.get('user_agent'):
+                _ua = _fake_windows_ua(playwright)
+                if _ua:
+                    opts['user_agent'] = _ua
+                    _inject_fp = True
             if user_data_dir:
                 _clean_singleton_locks(user_data_dir)
                 opts['user_data_dir'] = user_data_dir
@@ -214,6 +331,60 @@ async def launch_browser(
                     playwright.chromium.launch(**opts),
                     timeout=_LAUNCH_TIMEOUT,
                 )
+            # JS 层指纹注入：persistent context 直接支持；普通 Browser
+            # 对象没有该方法（由各 context 自行注入），忽略即可。
+            # 注意 persistent context 自带的初始页面早于 add_init_script
+            # 存在，要立即对已有页面补一次注入。
+            if _inject_fp:
+                # patchright 阉割了 add_init_script；route.fulfill 回填的
+                # 页面脚本也不执行。可行的通道只剩逐 frame evaluate
+                # （见 apply_windows_fingerprint），由调用方在页面/iframe
+                # 就绪后调用。
+                # navigator.platform 是 LegacyUnforgeable 属性，JS 层覆盖不了，
+                # 必须走 CDP Emulation.setUserAgentOverride（Playwright 自己
+                # 设 UA 就是这个通道，不会引入额外检测面）
+                _ua_str = opts.get('user_agent')
+                if _ua_str:
+                    async def _apply_platform(pg):
+                        try:
+                            cdp = await pg.context.new_cdp_session(pg)
+                            _major = _ua_str.split('Chrome/')[1].split('.')[0]
+                            await cdp.send('Emulation.setUserAgentOverride', {
+                                'userAgent': _ua_str,
+                                'platform': 'Windows',
+                                'acceptLanguage': 'zh-CN,zh;q=0.9',
+                                # 不带 userAgentMetadata 会把 navigator.userAgentData
+                                # 清空，必须与 UA 品牌一致地补上
+                                'userAgentMetadata': {
+                                    'brands': [
+                                        {'brand': 'Chromium', 'version': _major},
+                                        {'brand': 'Not A(Brand', 'version': '99'},
+                                        {'brand': 'Google Chrome', 'version': _major},
+                                    ],
+                                    'fullVersionList': [
+                                        {'brand': 'Chromium', 'version': _major + '.0.0.0'},
+                                        {'brand': 'Not A(Brand', 'version': '99.0.0.0'},
+                                        {'brand': 'Google Chrome', 'version': _major + '.0.0.0'},
+                                    ],
+                                    'fullVersion': _major + '.0.0.0',
+                                    'platform': 'Windows',
+                                    'platformVersion': '15.0.0',
+                                    'architecture': 'x86',
+                                    'model': '',
+                                    'mobile': False,
+                                    'bitness': '64',
+                                    'wow64': False,
+                                },
+                            })
+                        except Exception:
+                            pass
+                    try:
+                        for _pg in (getattr(browser, 'pages', None) or []):
+                            await _apply_platform(_pg)
+                        # 之后新建的页面同样补 CDP 覆盖
+                        browser.on('page', lambda pg: asyncio.create_task(_apply_platform(pg)))
+                    except Exception:
+                        pass
             if attempt:
                 logger.info(f"{purpose}: 第 {attempt + 1} 次尝试启动成功")
             return LimitedBrowser(browser, semaphore, purpose)
@@ -258,6 +429,23 @@ def browser_slot(purpose: str = '浏览器任务'):
         yield
     finally:
         semaphore.release()
+
+
+async def apply_windows_fingerprint(page) -> int:
+    """在页面所有 frame 里执行 Windows 指纹伪装脚本，返回成功 frame 数。
+
+    patchright 阉割了 add_init_script，route.fulfill 的脚本也不执行，
+    只能由调用方在页面/iframe 就绪后显式调用（跨域 iframe 也可 evaluate）。
+    iframe 晚加载的场景建议周期性重刷。
+    """
+    ok = 0
+    for fr in page.frames:
+        try:
+            await fr.evaluate(_WIN_FINGERPRINT_JS)
+            ok += 1
+        except Exception:
+            continue
+    return ok
 
 
 def acquire_slot(purpose: str = '浏览器任务') -> None:

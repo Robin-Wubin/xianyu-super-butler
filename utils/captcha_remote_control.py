@@ -325,12 +325,34 @@ class CaptchaRemoteController:
                 if now - _sess.get('_last_move', 0.0) < 0.03:
                     return True
                 _sess['_last_move'] = now
+                _sess['_move_count'] = _sess.get('_move_count', 0) + 1
+                if _sess['_move_count'] % 10 == 1:
+                    logger.info(f"🖱️ 拖动轨迹采样: ({x}, {y}) 本会话累计 {_sess['_move_count']} 个 move 点")
                 await page.mouse.move(x, y)
                 self._maybe_snapshot_fallback(session_id)
-                
+
             elif event_type == 'up':
                 await page.mouse.up()
-                logger.info(f"🖱️ 鼠标释放: ({x}, {y})")
+                _moves = self.active_sessions[session_id].get('_move_count', 0)
+                logger.info(f"🖱️ 鼠标释放: ({x}, {y}) 本次拖动 move 点数={_moves}")
+                if _moves < 5:
+                    logger.warning("拖动轨迹点过少（<5），滑块会判定为机器瞬移，请放慢拖动速度")
+                # 读取滑块反馈文本，便于区分「轨迹问题」与「环境风控」
+                try:
+                    await asyncio.sleep(0.6)
+                    for frame in [page] + page.frames:
+                        try:
+                            err = await frame.evaluate(
+                                "() => {const el = document.querySelector('.errloading, [class*=error], .nc-lang-cnt *');"
+                                " return el ? (el.textContent || '').trim().slice(0, 40) : '';}"
+                            )
+                        except Exception:
+                            err = ''
+                        if err:
+                            logger.info(f"🧩 滑块反馈: {err}")
+                            break
+                except Exception:
+                    pass
                 
             else:
                 logger.warning(f"未知事件类型: {event_type}")
