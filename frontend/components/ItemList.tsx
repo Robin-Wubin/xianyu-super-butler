@@ -246,9 +246,14 @@ const ItemList: React.FC = () => {
 
   // 下架商品默认藏起来：它们和在售的混在一起会让人误以为还能卖，
   // 但不能直接删 —— 专属发货配置挂在商品上，重新上架还要接着用。
-  const [showOffShelf, setShowOffShelf] = useState(false);
+  // （展示由「在售/已下架」筛选下拉控制）
 
   const isOffShelf = (item: Item) => item.listing_status === 'off_shelf';
+  // 已售出判定：只认闲鱼原始数据的 itemStatus（1=已售出，0=在售）。
+  // 订单交叉统计不能作为判定：在售商品可以反复成交多次，有历史订单
+  // 不代表已下架售罄。sold_qty 仅作为「累计销量」展示。
+  const soldQty = (item: Item) => (item.sold_qty ?? item.sold_count ?? 0) as number;
+  const isSold = (item: Item) => item.item_status === 1;
 
   const accountScopedItems = useMemo(
     () => (listAccountFilter ? items.filter(item => item.cookie_id === listAccountFilter) : items),
@@ -260,9 +265,18 @@ const ItemList: React.FC = () => {
     [accountScopedItems],
   );
 
+  // 上下架筛选：三态（全部 / 在售=上架 / 已下架）。
+  // 已下架默认不勾进「全部」以外的混淆：徽标已区分已售出，筛选只管上架状态。
+  const [listingFilter, setListingFilter] = useState<'all' | 'on' | 'off'>('all');
+
   const visibleItems = useMemo(
-    () => (showOffShelf ? accountScopedItems : accountScopedItems.filter(item => !isOffShelf(item))),
-    [accountScopedItems, showOffShelf],
+    () => accountScopedItems
+      .filter(item => (
+        listingFilter === 'all' ? true
+          : listingFilter === 'on' ? !isOffShelf(item)
+            : isOffShelf(item)
+      )),
+    [accountScopedItems, listingFilter],
   );
 
   // 商品数据由后端一次性返回，这里做客户端分页：商品多时一屏几十行难以浏览
@@ -725,20 +739,19 @@ const ItemList: React.FC = () => {
               <span className="text-xs text-gray-500">
                 已配置专属发货 {configuredItemCount} 件
               </span>
-              {offShelfCount > 0 && (
-                <label className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-500">
-                  <input
-                    type="checkbox"
-                    className="h-3.5 w-3.5 cursor-pointer accent-brand-500"
-                    checked={showOffShelf}
-                    onChange={event => {
-                      setShowOffShelf(event.target.checked);
-                      setPage(1);
-                    }}
-                  />
-                  显示已下架（{offShelfCount}）
-                </label>
-              )}
+              <select
+                className="ios-input rounded-md px-2 py-1.5 text-xs"
+                value={listingFilter}
+                onChange={event => {
+                  setListingFilter(event.target.value as 'all' | 'on' | 'off');
+                  setPage(1);
+                }}
+                aria-label="按上下架状态筛选"
+              >
+                <option value="all">全部商品</option>
+                <option value="on">在售（{accountScopedItems.length - offShelfCount}）</option>
+                <option value="off">已下架（{offShelfCount}）</option>
+              </select>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -795,12 +808,8 @@ const ItemList: React.FC = () => {
                   const deliveryConfigured = Boolean(configSummary || rule);
                   const deliveryEnabled = configSummary?.enabled ?? Boolean(rule?.enabled);
                   const deliveryIncomplete = Boolean(configSummary && !configSummary.complete);
-                  const statusClass = deliveryEnabled
-                    ? (deliveryIncomplete ? 'status-badge-warning' : 'status-badge-success')
-                    : (deliveryConfigured ? 'status-badge-warning' : 'status-badge-info');
-                  const statusText = deliveryEnabled
-                    ? (deliveryIncomplete ? '待完善' : '发货中')
-                    : (deliveryConfigured ? '已暂停' : '未配置');
+                  // 发货状态不在商品名旁重复展示徽标：
+                  // 「专属自动发货」列已有图标、绑定详情和开关，信息更全
                   const deliveryTitle = configSummary
                     ? (
                       configSummary.is_multi_spec
@@ -834,6 +843,22 @@ const ItemList: React.FC = () => {
                             }`}>
                               {item.item_title || '未命名商品'}
                             </h3>
+                            {isSold(item) && (
+                              <span
+                                className="status-badge status-badge-warning shrink-0"
+                                title="闲鱼官方状态：已售出（itemStatus=1）"
+                              >
+                                已售出
+                              </span>
+                            )}
+                            {!isSold(item) && soldQty(item) > 0 && (
+                              <span
+                                className="status-badge shrink-0 bg-emerald-50 text-emerald-600"
+                                title={`在售中，累计售出 ${soldQty(item)} 件（有效订单，已排除退款/关闭）`}
+                              >
+                                销量 ×{soldQty(item)}
+                              </span>
+                            )}
                             {isOffShelf(item) && (
                               <span
                                 className="status-badge shrink-0 bg-gray-100 text-gray-500"
@@ -846,9 +871,6 @@ const ItemList: React.FC = () => {
                                 已下架
                               </span>
                             )}
-                            <span className={`status-badge shrink-0 ${statusClass}`}>
-                              {statusText}
-                            </span>
                           </div>
                           <p className="mt-1 text-lg font-bold text-[#d92d20]">{formatPrice(item.item_price)}</p>
                           <p className="mt-1 truncate font-mono text-xs text-gray-400">商品 ID {item.item_id}</p>

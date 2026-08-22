@@ -5442,6 +5442,49 @@ def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
             items = db_manager.get_items_by_cookie(cookie_id)
             all_items.extend(items)
 
+        # 透出闲鱼原始数据的售出状态：同步时 item.list 返回的
+        # cardData.itemStatus == 1 即官方“已售出”标志（0=在售），已随
+        # item_detail JSON 存库。这是最权威的判定来源。
+        for item in all_items:
+            parsed = item.get('item_detail_parsed') or {}
+            status = parsed.get('item_status')
+            if status is not None:
+                item['item_status'] = int(status)
+
+        # 订单交叉统计作为辅助：itemStatus 缺失（旧数据/手动商品）时，
+        # orders 表有成交记录（排除退款/关闭）也视为已售出
+        try:
+            cookie_ids = list(user_cookies.keys())
+            if cookie_ids:
+                placeholders = ','.join('?' * len(cookie_ids))
+                with db_manager.lock:
+                    cursor = db_manager.conn.cursor()
+                    cursor.execute(
+                        f'''
+                        SELECT item_id,
+                               COUNT(*) AS order_cnt,
+                               SUM(COALESCE(buy_num, 1)) AS sold_qty
+                        FROM orders
+                        WHERE cookie_id IN ({placeholders})
+                          AND (order_status IS NULL OR order_status = '' OR (
+                                order_status NOT LIKE '%退款%'
+                            AND order_status NOT LIKE '%关闭%'
+                            AND order_status NOT LIKE '%cancel%'))
+                        GROUP BY item_id
+                        ''',
+                        tuple(cookie_ids),
+                    )
+                    sold_stats = {
+                        str(row[0]): {'sold_count': row[1], 'sold_qty': row[2] or 0}
+                        for row in cursor.fetchall()
+                    }
+                for item in all_items:
+                    stat = sold_stats.get(str(item.get('item_id')))
+                    if stat:
+                        item.update(stat)
+        except Exception as exc:
+            logger.warning(f"统计已售商品失败（忽略）: {exc}")
+
         return {"items": all_items}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取商品信息失败: {str(e)}")

@@ -191,9 +191,17 @@ async def launch_browser(
     last_err: Optional[BaseException] = None
     for attempt in range(3):
         try:
+            opts = dict(launch_options or {})
+            # 统一中文环境：容器里没有 locale 设置时 Chromium 默认 en-US，
+            # 打开闲鱼/淘宝会重定向到英文版页面，还会影响风控指纹。
+            opts['locale'] = 'zh-CN'
+            opts['timezone_id'] = 'Asia/Shanghai'
+            args = list(opts.get('args') or [])
+            if '--lang=zh-CN' not in args:
+                args.append('--lang=zh-CN')
+            opts['args'] = args
             if user_data_dir:
                 _clean_singleton_locks(user_data_dir)
-                opts = dict(launch_options or {})
                 opts['user_data_dir'] = user_data_dir
                 browser = await asyncio.wait_for(
                     playwright.chromium.launch_persistent_context(**opts),
@@ -203,7 +211,7 @@ async def launch_browser(
                 # 启动阶段单独限时：Chromium 崩溃（如 OOM）时 playwright 的 launch()
                 # 可能永久挂起且不抛异常，槽位会被无限期占住，拖死后续所有浏览器任务
                 browser = await asyncio.wait_for(
-                    playwright.chromium.launch(**(launch_options or {})),
+                    playwright.chromium.launch(**opts),
                     timeout=_LAUNCH_TIMEOUT,
                 )
             if attempt:

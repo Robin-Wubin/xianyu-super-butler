@@ -2593,6 +2593,22 @@ class XianyuLive:
                 except Exception as _me:
                     logger.debug(f"检查人工验证会话状态失败（忽略）: {_me}")
 
+                # 设置项：自动滑块开关（默认开启）。关闭后风控触发时不再
+                # 自动尝试拖滑块，直接留给用户点「人工验证」自己拖 ——
+                # 自动滑块成功率低且失败会加深风控冷却等级。
+                try:
+                    from app.db_manager import db_manager
+                    _auto_slider = (db_manager.get_system_setting('auto_slider_enabled') or 'true').strip().lower()
+                    if _auto_slider != 'true':
+                        logger.info(f"【{self.cookie_id}】自动滑块已在设置中关闭，等待人工验证")
+                        log_captcha_event(
+                            self.cookie_id, "自动滑块已禁用", None,
+                            "设置项 auto_slider_enabled=false，请在账号页点「人工验证」拖滑块"
+                        )
+                        return None
+                except Exception as _se:
+                    logger.debug(f"读取自动滑块设置失败（按默认开启处理）: {_se}")
+
                 # 创建独立的滑块验证实例（每个用户独立实例，避免并发冲突）
                 # headless 必须为 False：实测同一账号、同一轨迹下，
                 # 无头 0/2 通过，有头 1/3 通过且平台确认解除风控。

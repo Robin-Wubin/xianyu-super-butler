@@ -473,13 +473,35 @@ const Settings: React.FC = () => {
       )}
 
       {activeSection === 'browser' && (
-        <section className="section-panel">
-          <SectionHeader
-            title="远程浏览器（Chrome MCP）"
-            description="配置后人工滑块验证改在本机真实 Chrome 中完成，不再占用服务器资源。"
-            icon={Globe}
-          />
-          <div className="grid gap-4 p-4">
+        <div className="grid gap-4">
+          <section className="section-panel">
+            <SectionHeader
+              title="滑块验证"
+              description="风控触发时如何完成滑块：自动尝试或留给你人工拖动。"
+              icon={Globe}
+            />
+            <div className="grid gap-4 p-4">
+              <SettingToggle
+                title="自动滑块验证"
+                description="开启后风控触发时系统自动尝试拖滑块（成功率较低，连续失败会加深风控冷却）。关闭后不再自动尝试，请及时在账号页点「人工验证」自己拖动完成。默认开启。"
+                checked={settings.auto_slider_enabled === undefined ? true : toBool(settings.auto_slider_enabled)}
+                onChange={() => setSettings({
+                  ...settings,
+                  auto_slider_enabled: (settings.auto_slider_enabled === undefined
+                    ? true
+                    : toBool(settings.auto_slider_enabled)) ? 'false' : 'true',
+                })}
+              />
+            </div>
+          </section>
+
+          <section className="section-panel">
+            <SectionHeader
+              title="远程浏览器（Chrome MCP）"
+              description="配置后人工滑块验证改在本机真实 Chrome 中完成，不再占用服务器资源。"
+              icon={Globe}
+            />
+            <div className="grid gap-4 p-4">
             <SettingToggle
               title="启用远程浏览器验证"
               description="开启后点击「人工验证」时，滑块惩罚页会在你本机的 Chrome 里打开，由你亲手拖动完成，服务器不再启动无头浏览器。要求本机运行 mcp-chrome（ChromeMcpServer）。"
@@ -522,8 +544,9 @@ const Settings: React.FC = () => {
                 streamable_http 形式的 MCP 端点，需与服务器网络互通；本机 Chrome 与服务器应使用同一出口 IP，否则验证产物可能无效。
               </span>
             </label>
-          </div>
-        </section>
+            </div>
+          </section>
+        </div>
       )}
 
       {activeSection === 'notice' && (

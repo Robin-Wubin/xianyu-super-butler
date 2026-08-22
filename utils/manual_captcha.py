@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -148,13 +149,15 @@ async def open_manual_session(
     cookie_id: str,
     cookies_str: str,
     timeout: int = DEFAULT_TIMEOUT,
-    headless: bool = True,
+    headless: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """打开一个人工验证会话，等待人在浏览器里完成滑块。
 
     Args:
         timeout: 等待人工操作的秒数，超时后放弃并关闭浏览器。
-        headless: 默认无头 —— 页面通过远程通道推给用户，不需要本地窗口。
+        headless: 默认自动判断 —— 有 Xvfb 显示器就用有头模式（指纹真实，
+            通过率显著更高），没有显示器才退化为无头。页面通过远程通道
+            推给用户，本地窗口由 Xvfb 承接，不需要物理显示器。
 
     Returns:
         ``{"success": bool, "cookies_str": str, "message": str, "session_id": str}``。
@@ -177,22 +180,36 @@ async def open_manual_session(
     context = None
     refresh_task = None
     try:
+        # 反检测三件套：
+        # 1) patchright 引擎 —— playwright 的补丁版，抹掉 CDP 自动化痕迹
+        #    （navigator.webdriver、Runtime.enable 指纹等），对阿里 nc 有效；
+        # 2) 有头模式 + Xvfb —— 无头 Chromium 的 WebGL 渲染器（SwiftShader）、
+        #    plugins、字体列表与真人浏览器差异巨大，拖得再像也会被判失败；
+        # 3) 不伪造 UA —— 之前写死 Windows Chrome UA，与 Linux 容器的
+        #    UA-CH / platform 指纹矛盾，反而是检测信号。
+        try:
+            from patchright.async_api import async_playwright
+            engine = "patchright"
+        except Exception:
+            from playwright.async_api import async_playwright
+            engine = "playwright"
+        _has_display = bool(os.environ.get("DISPLAY"))
+        _headless = (not _has_display) if headless is None else headless
+        logger.info(
+            f"【{cookie_id}】人工验证浏览器: engine={engine}, "
+            f"headless={_headless}, DISPLAY={os.environ.get('DISPLAY') or '无'}"
+        )
         playwright = await async_playwright().start()
         # 每账号固定 user-data-dir：环境跨会话一致，避免「全新环境」触发风控；
         # 目录在持久化卷上，容器重启不丢
         browser = await browser_limit.launch_browser(
             playwright,
-            {'headless': headless,
+            {'headless': _headless,
              # 只用完整版 Chromium。headless=True 默认会去找单独下载的
              # chromium_headless_shell，缺失时报 Executable doesn't exist，
              # 人工验证页面就会卡在「正在服务器上打开验证页面」。
              'channel': 'chromium',
              'viewport': {"width": 1280, "height": 800},
-             'user_agent': (
-                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                 "Chrome/138.0.0.0 Safari/537.36"
-             ),
              'args': [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",

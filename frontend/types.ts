@@ -148,6 +148,12 @@ export interface Item {
   /** 'on_sale' | 'off_shelf'：闲鱼接口是否还返回这件商品。
    *  同步只做 upsert，下架或删除的商品会留在库里，靠这个字段区分。 */
   listing_status?: string;
+  /** 闲鱼原始商品状态：1=已售出，0=在售（cardData.itemStatus） */
+  item_status?: number;
+  /** 有效成交订单数（排除退款/关闭），来自 orders 表交叉统计 */
+  sold_count?: number;
+  /** 有效成交总件数（按 buy_num 求和） */
+  sold_qty?: number;
   /** 最后一次被闲鱼接口返回的时间，用于在误判时提供依据。 */
   last_seen_at?: string;
   created_at?: string;
@@ -505,6 +511,8 @@ export interface SystemSettings {
   // 远程浏览器（Chrome MCP）：启用后人工滑块验证在本机真实 Chrome 完成
   mcp_browser_enabled?: string;
   mcp_browser_url?: string;
+  // 自动滑块验证：关闭后风控触发时不再自动拖滑块，留待人工验证
+  auto_slider_enabled?: string;
   default_reply?: string;
   registration_enabled?: boolean;
   // 注册是否必须填邮箱验证码。没配 SMTP 时关掉，否则注册会卡在收不到验证码
