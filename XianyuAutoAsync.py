@@ -2583,6 +2583,16 @@ class XianyuLive:
                 from utils.xianyu_slider_stealth import XianyuSliderStealth
                 logger.info(f"【{self.cookie_id}】XianyuSliderStealth导入成功，使用滑块验证")
 
+                # 人工验证会话进行中：挂起自动滑块，避免与人工浏览器
+                # 抢占浏览器槽位和内存（弱机上两个 Chromium 会互相拖死）
+                try:
+                    from utils.captcha_remote_control import captcha_controller
+                    if captcha_controller.session_exists(str(self.cookie_id)):
+                        logger.info(f"【{self.cookie_id}】人工验证会话进行中，跳过自动滑块验证（等待人工完成）")
+                        return None
+                except Exception as _me:
+                    logger.debug(f"检查人工验证会话状态失败（忽略）: {_me}")
+
                 # 创建独立的滑块验证实例（每个用户独立实例，避免并发冲突）
                 # headless 必须为 False：实测同一账号、同一轨迹下，
                 # 无头 0/2 通过，有头 1/3 通过且平台确认解除风控。
@@ -3007,6 +3017,17 @@ class XianyuLive:
             
             # 使用集成的 Playwright 登录方法（无需猴子补丁）
             from utils.xianyu_slider_stealth import XianyuSliderStealth
+
+            # 人工验证会话进行中：密码登录会让位，避免抢占浏览器槽位
+            # 把人工验证卡死在「等待浏览器空闲」上
+            try:
+                from utils.captcha_remote_control import captcha_controller
+                if captcha_controller.session_exists(str(self.cookie_id)):
+                    logger.info(f"【{self.cookie_id}】人工验证会话进行中，跳过密码登录刷新")
+                    return False
+            except Exception:
+                pass
+
             browser_mode = "有头" if show_browser else "无头"
             logger.info(f"【{self.cookie_id}】开始使用{browser_mode}浏览器进行密码登录刷新Cookie...")
             logger.info(f"【{self.cookie_id}】使用账号: {username}")
@@ -8075,18 +8096,19 @@ class XianyuLive:
                 )
 
             logger.info(f"【{target_cookie_id}】正在启动无头浏览器")
-            browser = await browser_limit.launch_browser(playwright, launch_options, "扫码登录")
+            launch_options['viewport'] = {'width': 1920, 'height': 1080}
+            launch_options['user_agent'] = (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+            )
+            browser = await browser_limit.launch_browser(
+                playwright, launch_options, "扫码登录",
+                user_data_dir=browser_limit.profile_dir(target_cookie_id),
+            )
             logger.info(f"【{target_cookie_id}】无头浏览器启动成功")
 
-            # 创建浏览器上下文
-            context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
-            }
-
-            # 使用标准窗口大小
-            context_options['viewport'] = {'width': 1920, 'height': 1080}
-
-            context = await browser.new_context(**context_options)
+            # 持久化上下文本身就是 BrowserContext，直接用
+            context = browser
 
             # 设置扫码登录获取的Cookie
             cookies = []
@@ -8419,10 +8441,9 @@ class XianyuLive:
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
             }
 
-            # 使用标准窗口大小
-            context_options['viewport'] = {'width': 1920, 'height': 1080}
-
-            context = await browser.new_context(**context_options)
+            # 持久化上下文本身就是 BrowserContext，直接用；标准窗口尺寸
+            launch_options['viewport'] = {'width': 1920, 'height': 1080}
+            context = browser
 
             # 设置当前的Cookie
             cookies = []
@@ -8719,17 +8740,23 @@ class XianyuLive:
                 browser_args,
                 "定时Cookie刷新"
             )
-            browser = await browser_limit.launch_browser(playwright, launch_options, "定时Cookie刷新")
+            launch_options['viewport'] = {'width': 1920, 'height': 1080}
+            launch_options['user_agent'] = (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+            )
+            browser = await browser_limit.launch_browser(
+                playwright, launch_options, "定时Cookie刷新",
+                user_data_dir=browser_limit.profile_dir(self.cookie_id),
+            )
 
             # 创建浏览器上下文
             context_options = {
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
             }
 
-            # 使用标准窗口大小
-            context_options['viewport'] = {'width': 1920, 'height': 1080}
-
-            context = await browser.new_context(**context_options)
+            # 持久化上下文本身就是 BrowserContext，直接用；标准窗口尺寸
+            context = browser
 
             # 设置当前Cookie
             cookies = []

@@ -18,6 +18,7 @@ import {
   refreshAccountProfile,
   getRiskControlStatus,
   startManualCaptchaSession,
+  getMcpCaptchaStatus,
   requestFreshCaptchaUrl,
 } from '../services/api';
 import { confirmAction, notify } from '../services/feedback';
@@ -59,6 +60,8 @@ const AccountList: React.FC = () => {
   const [captchaMessage, setCaptchaMessage] = useState('');
   const captchaWsRef = useRef<WebSocket | null>(null);
   const captchaImgRef = useRef<HTMLImageElement>(null);
+  // 服务端浏览器视口尺寸（screencast 帧是缩放后的全视口画面，需要按比例还原坐标）
+  const captchaViewportRef = useRef<{ width: number; height: number } | null>(null);
   const [failedAvatars, setFailedAvatars] = useState<Set<string>>(new Set());
 
   // 编辑表单状态
@@ -201,22 +204,49 @@ const AccountList: React.FC = () => {
     }
   };
 
-  // 人工滑块验证：在本页开弹窗，通过 WebSocket 把服务器端浏览器的截图推过来，
-  // 鼠标事件再回传驱动服务器上的真实浏览器 —— 相当于把远端浏览器镜像到这里。
-  // 这样部署在没有桌面的服务器上也能人工过验证，不需要访问服务器屏幕。
+  // 人工滑块验证：
+  // - 本地模式：在本页开弹窗，通过 WebSocket 把服务器端浏览器的截图推过来，
+  //   鼠标事件再回传驱动服务器上的真实浏览器 —— 相当于把远端浏览器镜像到这里。
+  //   这样部署在没有桌面的服务器上也能人工过验证，不需要访问服务器屏幕。
+  // - MCP 模式（系统设置里配置 Chrome MCP 后启用）：惩罚页直接开在用户本机
+  //   Chrome 里，用户亲手拖滑块，这里只轮询状态等结果。
+  const [captchaIsMcp, setCaptchaIsMcp] = useState(false);
   const handleManualCaptcha = async (account: AccountDetail) => {
     setCaptchaAccount(account);
     setCaptchaShot('');
+    setCaptchaIsMcp(false);
     setCaptchaStage('starting');
     setCaptchaMessage('正在服务器上启动验证页面，请稍候…');
     setManualCaptchaId(account.id);
 
     try {
       const result = await startManualCaptchaSession(account.id);
-      if (!result.success) throw new Error(result.message || '人工验证未完成');
-      setCaptchaStage('done');
-      setCaptchaMessage(result.message || '验证完成，账号 Cookie 已更新');
-      notify(result.message || '人工验证完成，账号 Cookie 已更新', 'success');
+      if (result.mode === 'mcp') {
+        // 远程浏览器模式：立即返回，轮询直到用户在本机 Chrome 拖完滑块
+        setCaptchaIsMcp(true);
+        setCaptchaMessage(result.message || '请到本机 Chrome 完成滑块拖动');
+        const deadline = Date.now() + 15 * 60 * 1000;
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 3000));
+          const st = await getMcpCaptchaStatus(account.id);
+          if (st.status === 'done') {
+            setCaptchaStage('done');
+            setCaptchaMessage('验证完成（远程浏览器），账号 Cookie 已更新');
+            notify('人工验证完成，账号 Cookie 已更新', 'success');
+            break;
+          }
+          if (st.status === 'failed') {
+            throw new Error(st.message || '远程浏览器验证失败');
+          }
+          setCaptchaMessage(st.message || '等待在本机 Chrome 完成滑块…');
+        }
+        if (Date.now() >= deadline) throw new Error('远程验证等待超时');
+      } else {
+        if (!result.success) throw new Error(result.message || '人工验证未完成');
+        setCaptchaStage('done');
+        setCaptchaMessage(result.message || '验证完成，账号 Cookie 已更新');
+        notify(result.message || '人工验证完成，账号 Cookie 已更新', 'success');
+      }
       const status = await getRiskControlStatus();
       setRiskBlocked((status.accounts || []).filter(item => item.blocked || (item.verification_type && item.verification_type !== 'none')));
       await loadAccounts({ silent: true });
@@ -230,9 +260,10 @@ const AccountList: React.FC = () => {
     }
   };
 
-  // 弹窗打开后连上服务器端会话，持续接收截图；关闭时断开
+  // 弹窗打开后连上服务器端会话，持续接收截图；关闭时断开。
+  // MCP 模式没有本地浏览器会话，不连 WS。
   useEffect(() => {
-    if (!captchaAccount) {
+    if (!captchaAccount || captchaIsMcp) {
       captchaWsRef.current?.close();
       captchaWsRef.current = null;
       return;
@@ -241,6 +272,19 @@ const AccountList: React.FC = () => {
     let closed = false;
     let retry = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+
+    // 会话要等服务端开浏览器、导航惩罚页，弱机上可能要 30 秒以上；
+    // 这里用单一定时器串行重试（防抖），避免 error 和 onclose 两条路径
+    // 各自调度重连形成风暴，瞬间烧光重试额度。
+    const scheduleRetry = () => {
+      if (closed || timer) return;
+      if (retry >= 60) return;
+      retry += 1;
+      timer = setTimeout(() => {
+        timer = undefined;
+        connect();
+      }, 1500);
+    };
 
     const connect = () => {
       if (closed) return;
@@ -258,6 +302,9 @@ const AccountList: React.FC = () => {
           return;
         }
         if (data.type === 'session_info' || data.type === 'screenshot_update') {
+          if (data.viewport && data.viewport.width) {
+            captchaViewportRef.current = data.viewport;
+          }
           if (data.screenshot) {
             setCaptchaShot(
               String(data.screenshot).startsWith('data:')
@@ -272,17 +319,13 @@ const AccountList: React.FC = () => {
           setCaptchaMessage('验证通过，正在回收 Cookie…');
         } else if (data.type === 'error') {
           // 会话尚未建立时后端会立刻返回 error，稍后重试即可
-          if (retry < 20) {
-            retry += 1;
-            timer = setTimeout(connect, 1000);
-          }
+          scheduleRetry();
         }
       };
 
       ws.onclose = () => {
-        if (!closed && retry < 20) {
-          retry += 1;
-          timer = setTimeout(connect, 1000);
+        if (!closed) {
+          scheduleRetry();
         }
       };
     };
@@ -294,7 +337,7 @@ const AccountList: React.FC = () => {
       captchaWsRef.current?.close();
       captchaWsRef.current = null;
     };
-  }, [captchaAccount]);
+  }, [captchaAccount, captchaIsMcp]);
 
   // 把本页的鼠标坐标换算成服务器端浏览器的坐标后回传
   const sendCaptchaMouse = (eventType: 'down' | 'move' | 'up', e: React.MouseEvent) => {
@@ -304,8 +347,15 @@ const AccountList: React.FC = () => {
 
     const rect = img.getBoundingClientRect();
     // 截图在页面上被等比缩放显示，坐标要按缩放比还原回原始分辨率
-    const x = (e.clientX - rect.left) * (img.naturalWidth / rect.width);
-    const y = (e.clientY - rect.top) * (img.naturalHeight / rect.height);
+    let x = (e.clientX - rect.left) * (img.naturalWidth / rect.width);
+    let y = (e.clientY - rect.top) * (img.naturalHeight / rect.height);
+    // screencast 帧是缩放后的全视口画面，帧像素 × (视口宽 / 帧宽) = 页面 CSS 坐标
+    const vp = captchaViewportRef.current;
+    if (vp && img.naturalWidth) {
+      const k = vp.width / img.naturalWidth;
+      x *= k;
+      y *= k;
+    }
     ws.send(JSON.stringify({
       type: 'mouse_event',
       event_type: eventType,
@@ -1224,7 +1274,7 @@ const AccountList: React.FC = () => {
                     src={captchaShot}
                     alt="服务器端验证页面"
                     draggable={false}
-                    className="max-h-[460px] w-auto cursor-crosshair select-none rounded"
+                    className="max-h-[82vh] w-full cursor-crosshair select-none rounded object-contain"
                     onMouseDown={e => { e.preventDefault(); sendCaptchaMouse('down', e); }}
                     onMouseMove={e => { if (e.buttons === 1) sendCaptchaMouse('move', e); }}
                     onMouseUp={e => sendCaptchaMouse('up', e)}

@@ -3,6 +3,7 @@ import {
   Database,
   Eye,
   EyeOff,
+  Globe,
   KeyRound,
   Mail,
   Megaphone,
@@ -21,6 +22,7 @@ import {
   deleteQuickPhrase,
   getQuickPhrases,
   getSystemSettings,
+  testMcpBrowser,
   updateQuickPhrase,
   updateSystemSettings,
 } from '../services/api';
@@ -34,7 +36,7 @@ import {
   SectionHeader,
 } from './ui';
 
-type SettingsSection = 'general' | 'ai' | 'email' | 'phrases' | 'notice';
+type SettingsSection = 'general' | 'ai' | 'email' | 'phrases' | 'notice' | 'browser';
 
 /**
  * 把后端的开关值转成布尔。
@@ -94,6 +96,7 @@ const Settings: React.FC = () => {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testingMcp, setTestingMcp] = useState(false);
   const [activeSection, setActiveSection] = useState<SettingsSection>('general');
   // 快捷短语：人工客服常用话术
   const [phrases, setPhrases] = useState<QuickPhrase[]>([]);
@@ -231,6 +234,7 @@ const Settings: React.FC = () => {
           { id: 'email', label: '邮件服务', icon: Mail },
           { id: 'phrases', label: '快捷短语', icon: Zap },
           { id: 'notice', label: '公告与更新', icon: Megaphone },
+          { id: 'browser', label: '远程浏览器', icon: Globe },
         ]}
       />
 
@@ -466,6 +470,60 @@ const Settings: React.FC = () => {
           </section>
 
         </div>
+      )}
+
+      {activeSection === 'browser' && (
+        <section className="section-panel">
+          <SectionHeader
+            title="远程浏览器（Chrome MCP）"
+            description="配置后人工滑块验证改在本机真实 Chrome 中完成，不再占用服务器资源。"
+            icon={Globe}
+          />
+          <div className="grid gap-4 p-4">
+            <SettingToggle
+              title="启用远程浏览器验证"
+              description="开启后点击「人工验证」时，滑块惩罚页会在你本机的 Chrome 里打开，由你亲手拖动完成，服务器不再启动无头浏览器。要求本机运行 mcp-chrome（ChromeMcpServer）。"
+              checked={toBool(settings.mcp_browser_enabled)}
+              onChange={() => setSettings({
+                ...settings,
+                mcp_browser_enabled: toBool(settings.mcp_browser_enabled) ? 'false' : 'true',
+              })}
+            />
+            <label>
+              <span className="field-label">MCP 服务地址</span>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={settings.mcp_browser_url || ''}
+                  onChange={(event) => setSettings({ ...settings, mcp_browser_url: event.target.value })}
+                  className="ios-input w-full rounded-md px-3 py-2.5 font-mono text-sm"
+                  placeholder="http://192.168.0.108:8080/mcp"
+                />
+                <button
+                  type="button"
+                  disabled={testingMcp || !settings.mcp_browser_url}
+                  onClick={async () => {
+                    setTestingMcp(true);
+                    try {
+                      const r = await testMcpBrowser(settings.mcp_browser_url || '');
+                      notify(r.message, r.success ? 'success' : 'error');
+                    } catch (error) {
+                      notify(`测试失败：${(error as Error).message}`);
+                    } finally {
+                      setTestingMcp(false);
+                    }
+                  }}
+                  className="ios-btn-secondary shrink-0 rounded-md px-4 py-2 text-sm"
+                >
+                  {testingMcp ? '测试中…' : '测试连接'}
+                </button>
+              </div>
+              <span className="mt-1 block text-xs text-gray-500">
+                streamable_http 形式的 MCP 端点，需与服务器网络互通；本机 Chrome 与服务器应使用同一出口 IP，否则验证产物可能无效。
+              </span>
+            </label>
+          </div>
+        </section>
       )}
 
       {activeSection === 'notice' && (

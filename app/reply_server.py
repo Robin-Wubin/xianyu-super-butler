@@ -8892,9 +8892,49 @@ async def start_manual_captcha(
         )
 
     timeout = max(60, min(int(timeout or 300), 900))
+
+    # 远程浏览器（Chrome MCP）模式：惩罚页开在用户本机 Chrome 里，
+    # 用户亲手拖滑块，后端后台轮询收割 x5sec。这里立即返回，
+    # 前端轮询 mcp-status 直到完成。
+    try:
+        from utils.mcp_browser import get_mcp_config
+        mcp_cfg = get_mcp_config()
+    except Exception:
+        mcp_cfg = {'enabled': False, 'url': ''}
+    if mcp_cfg['enabled'] and mcp_cfg['url']:
+        async def _run_mcp_session() -> None:
+            from utils.mcp_browser import open_manual_session_mcp
+
+            mcp_result = await open_manual_session_mcp(
+                cookie_id, user_cookies[cookie_id], timeout=timeout
+            )
+            await _finalize_manual_captcha(cookie_id, mcp_result, current_user)
+
+        asyncio.create_task(_run_mcp_session())
+        return JSONResponse({
+            'success': True,
+            'mode': 'mcp',
+            'message': '已在本机 Chrome 打开验证页，请切换到 Chrome 完成滑块拖动',
+            'session_id': cookie_id,
+        })
+
     result = await open_manual_session(
         cookie_id, user_cookies[cookie_id], timeout=timeout
     )
+
+    await _finalize_manual_captcha(cookie_id, result, current_user)
+
+    return JSONResponse({
+        'success': result['success'],
+        'message': result['message'],
+        'session_id': result['session_id'],
+    })
+
+
+async def _finalize_manual_captcha(cookie_id: str, result: Dict[str, Any], current_user: Dict[str, Any]) -> None:
+    """人工验证收尾：保存 Cookie、解除熔断、同步运行实例。两种模式共用。"""
+    from app.db_manager import db_manager
+    from utils import risk_control
 
     if result['success']:
         # 拿到 x5sec 后必须清掉 x5secdata 等挑战标记，否则闲鱼会认为验证仍未完成，
@@ -8930,11 +8970,24 @@ async def start_manual_captcha(
             log_with_user('warning', f"重置风控状态失败: {exc}", current_user)
         log_with_user('info', f"账号 {cookie_id} 人工验证完成，已更新 Cookie", current_user)
 
-    return JSONResponse({
-        'success': result['success'],
-        'message': result['message'],
-        'session_id': result['session_id'],
-    })
+
+@app.get('/api/captcha/mcp-status/{cookie_id}')
+async def get_mcp_captcha_status(cookie_id: str):
+    """远程浏览器（MCP）人工验证会话状态，前端轮询用。"""
+    from utils.mcp_browser import mcp_sessions
+
+    state = mcp_sessions.get(cookie_id)
+    if not state:
+        return {'session_id': cookie_id, 'status': 'unknown', 'message': '无进行中的远程验证会话'}
+    return {'session_id': cookie_id, **state}
+
+
+@app.post('/api/captcha/mcp-test')
+async def test_mcp_browser(url: str = Form(...), _: Dict[str, Any] = Depends(require_admin)):
+    """测试 Chrome MCP 连接（设置页用）。"""
+    from utils.mcp_browser import test_mcp_connection
+
+    return await test_mcp_connection(url)
 
 
 def classify_verification_event(detail: str, blocked: bool = False, reason: str = '') -> Tuple[str, str]:

@@ -178,6 +178,8 @@ async def open_manual_session(
     refresh_task = None
     try:
         playwright = await async_playwright().start()
+        # 每账号固定 user-data-dir：环境跨会话一致，避免「全新环境」触发风控；
+        # 目录在持久化卷上，容器重启不丢
         browser = await browser_limit.launch_browser(
             playwright,
             {'headless': headless,
@@ -185,6 +187,12 @@ async def open_manual_session(
              # chromium_headless_shell，缺失时报 Executable doesn't exist，
              # 人工验证页面就会卡在「正在服务器上打开验证页面」。
              'channel': 'chromium',
+             'viewport': {"width": 1280, "height": 800},
+             'user_agent': (
+                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/138.0.0.0 Safari/537.36"
+             ),
              'args': [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -192,15 +200,10 @@ async def open_manual_session(
                 "--disable-blink-features=AutomationControlled",
             ]},
             "人工验证码",
+            user_data_dir=browser_limit.profile_dir(cookie_id),
         )
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/138.0.0.0 Safari/537.36"
-            ),
-        )
+        # launch_persistent_context 返回的就是 BrowserContext
+        context = browser
 
         if cookies_str:
             await context.add_cookies(_to_playwright_cookies(cookies_str))

@@ -332,11 +332,26 @@ export const startManualCaptchaSession = async (
   success: boolean;
   message: string;
   session_id: string;
+  mode?: 'mcp' | 'local';
 }> => {
   const formData = new FormData();
   formData.append('cookie_id', cookieId);
   formData.append('timeout', String(timeout));
   return post('/api/captcha/manual-session', formData, { timeout: (timeout + 30) * 1000 });
+};
+
+// 远程浏览器（Chrome MCP）人工验证会话状态轮询
+export const getMcpCaptchaStatus = async (
+  cookieId: string,
+): Promise<{ session_id: string; status: 'waiting' | 'done' | 'failed' | 'unknown'; message: string }> => {
+  return get(`/api/captcha/mcp-status/${encodeURIComponent(cookieId)}`);
+};
+
+// 测试 Chrome MCP 连接
+export const testMcpBrowser = async (url: string): Promise<{ success: boolean; message: string }> => {
+  const formData = new FormData();
+  formData.append('url', url);
+  return post('/api/captcha/mcp-test', formData);
 };
 
 // 商品擦亮：重新获取搜索曝光，平台对每日次数有限制

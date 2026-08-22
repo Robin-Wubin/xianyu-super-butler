@@ -110,14 +110,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     'screenshot': screenshot
                                 })
                     else:
-                        # 按下或移动时，实时更新截图（截取整个验证码容器）
-                        if event_type in ['down', 'move']:
-                            # 截取整个验证码容器，降低质量换取速度
+                        # down/move 不再逐事件截图（太慢）；
+                        # screencast 模式下浏览器会主动推帧，旧模式由前端定时请求刷新
+                        if event_type in ['down', 'move'] and not captcha_controller.is_screencast_active(session_id):
                             screenshot = await captcha_controller.update_screenshot(session_id, quality=30)
                             if screenshot:
                                 await websocket.send_json({
                                     'type': 'screenshot_update',
-                                    'screenshot': screenshot
+                                    'screenshot': screenshot,
+                                    'viewport': None
                                 })
             
             elif msg_type == 'check_completion':

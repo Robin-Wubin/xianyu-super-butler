@@ -34,6 +34,11 @@ _limit: Optional[int] = None
 # 与其无限期挂着，不如报错让上层记录并重试。
 _ACQUIRE_TIMEOUT = 300
 
+# Chromium 启动阶段的超时。正常冷启动即便在弱机上也应在 1 分钟内完成；
+# 超过这个时间基本是浏览器进程已崩溃而 playwright 未感知，挂等只会
+# 白白占住槽位（弱机单槽位时等于拖死全部浏览器任务）。
+_LAUNCH_TIMEOUT = 180
+
 
 def _detect_total_memory_gb() -> Optional[float]:
     """物理内存（GB）。取不到时返回 None，由调用方只按 CPU 判断。"""
@@ -123,14 +128,53 @@ class LimitedBrowser:
         return getattr(self._browser, name)
 
 
+def profile_dir(account_id: str) -> str:
+    """每个账号固定的浏览器 user-data-dir。
+
+    每次都用临时 profile 的话，浏览器环境（Cookie、localStorage、canvas 指纹、
+    登录痕迹）每次都是全新的 —— 这正是无头浏览器触发风控的典型特征。固定
+    user-data-dir 让同一账号的浏览器环境跨会话保持一致，且目录放在持久化
+    卷上（data/browser_profiles），容器重启也不丢。
+    """
+    import re
+
+    safe = re.sub(r'[^0-9A-Za-z_-]', '', str(account_id)) or 'default'
+    base = os.getenv('BROWSER_PROFILES_DIR') or os.path.join(
+        os.getcwd(), 'data', 'browser_profiles'
+    )
+    path = os.path.join(base, f'user_{safe}')
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        logger.warning(f"创建浏览器 profile 目录失败（回退临时目录）: {exc}")
+        import tempfile
+        path = tempfile.mkdtemp(prefix='browser_profile_')
+    return path
+
+
+def _clean_singleton_locks(user_data_dir: str) -> None:
+    """清掉 Chromium 的单例锁文件，否则上次异常退出后同一目录无法再启动。"""
+    for name in ('SingletonLock', 'SingletonCookie', 'SingletonSocket'):
+        path = os.path.join(user_data_dir, name)
+        try:
+            if os.path.lexists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 async def launch_browser(
     playwright: Any,
     launch_options: Optional[Dict[str, Any]] = None,
     purpose: str = '浏览器任务',
+    user_data_dir: Optional[str] = None,
 ) -> LimitedBrowser:
     """取到槽位后再启动浏览器；没有空位就等着。
 
     调用方必须像以前一样在 finally 里 close()，槽位随之归还。
+    传 ``user_data_dir`` 时改用 ``launch_persistent_context``（同一账号
+    固定目录，环境跨会话一致）；返回的对象上 ``new_page()``、
+    ``add_cookies()``、``cookies()`` 等用法与 context 一致。
     """
     semaphore = _get_semaphore()
 
@@ -142,12 +186,45 @@ async def launch_browser(
             "可能有浏览器任务卡住未退出，或机器性能不足以支撑当前账号数量。"
         )
 
-    try:
-        browser = await playwright.chromium.launch(**(launch_options or {}))
-    except BaseException:
-        # 启动失败要立刻归还，否则槽位会被永久占住
-        semaphore.release()
-        raise
+    # 启动最多重试 3 次：弱机内存紧张时 Chromium 偶发启动即段错误
+    # （SIGSEGV / crashpad 报错），等几秒让内核回收内存后重试通常就能成功
+    last_err: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            if user_data_dir:
+                _clean_singleton_locks(user_data_dir)
+                opts = dict(launch_options or {})
+                opts['user_data_dir'] = user_data_dir
+                browser = await asyncio.wait_for(
+                    playwright.chromium.launch_persistent_context(**opts),
+                    timeout=_LAUNCH_TIMEOUT,
+                )
+            else:
+                # 启动阶段单独限时：Chromium 崩溃（如 OOM）时 playwright 的 launch()
+                # 可能永久挂起且不抛异常，槽位会被无限期占住，拖死后续所有浏览器任务
+                browser = await asyncio.wait_for(
+                    playwright.chromium.launch(**(launch_options or {})),
+                    timeout=_LAUNCH_TIMEOUT,
+                )
+            if attempt:
+                logger.info(f"{purpose}: 第 {attempt + 1} 次尝试启动成功")
+            return LimitedBrowser(browser, semaphore, purpose)
+        except BaseException as e:
+            last_err = e
+            logger.warning(
+                f"{purpose}: 浏览器启动失败（第 {attempt + 1}/3 次，"
+                f"{type(e).__name__}），{'稍后重试' if attempt < 2 else '放弃'}"
+            )
+            if attempt < 2:
+                await asyncio.sleep(3 + attempt * 5)  # 给内核留回收内存的时间
+                continue
+            # 启动失败要立刻归还，否则槽位会被永久占住
+            semaphore.release()
+            raise last_err
+
+    # 理论上到不了这里，防御性处理
+    semaphore.release()
+    raise last_err or RuntimeError(f"{purpose}: 浏览器启动失败")
 
     return LimitedBrowser(browser, semaphore, purpose)
 

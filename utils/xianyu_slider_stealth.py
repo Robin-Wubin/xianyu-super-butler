@@ -474,9 +474,10 @@ class XianyuSliderStealth:
             # 识破，连真人手动拖动都判定失败；换成系统正式版 Chrome + 持久化用户目录后
             # 同样的手动拖动即可通过。因此这里必须走 channel='chrome' 的持久化上下文，
             # 让 CDP 之外的指纹（二进制版本、插件、WebGL、历史 profile）都保持真实。
-            user_data_dir = os.path.join(
-                os.getcwd(), 'browser_data', f'slider_{self.pure_user_id}'
-            )
+            # 注意：与人工验证/密码登录共用同一账号 profile（data/browser_profiles），
+            # 保证同一账号的浏览器环境完全一致，且目录在持久化卷上容器重启不丢
+            from utils.browser_limit import profile_dir
+            user_data_dir = profile_dir(self.pure_user_id)
             os.makedirs(user_data_dir, exist_ok=True)
             self._clean_singleton_lock_files(user_data_dir)
 
@@ -2952,8 +2953,9 @@ class XianyuSliderStealth:
             logger.info("=" * 60)
             
             # 启动浏览器（使用持久化上下文）
-            import os
-            user_data_dir = os.path.join(os.getcwd(), 'browser_data', f'user_{self.pure_user_id}')
+            # 与滑块验证/人工验证共用同一账号 profile，环境保持一致且持久化
+            from utils.browser_limit import profile_dir
+            user_data_dir = profile_dir(self.pure_user_id)
             os.makedirs(user_data_dir, exist_ok=True)
             logger.info(f"【{self.pure_user_id}】使用用户数据目录: {user_data_dir}")
             
@@ -4263,7 +4265,7 @@ class XianyuSliderStealth:
 
         用 user_data_dir 精确匹配，避免误杀用户自己开的浏览器或其他账号的实例。
         """
-        marker = f"browser_data{os.sep}slider_{self.pure_user_id}"
+        marker = f"browser_profiles{os.sep}user_{self.pure_user_id}"
         killed = 0
 
         try:

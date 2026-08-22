@@ -60,6 +60,7 @@ LABEL maintainer="23Star" \
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        nodejs \
         tzdata \
         curl \
         ca-certificates \

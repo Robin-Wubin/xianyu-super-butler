@@ -28,11 +28,8 @@ class CaptchaRemoteController:
         Returns:
             包含会话信息的字典
         """
-        # 获取滑块元素位置
-        captcha_info = await self._get_captcha_info(page)
-        
-        # 只截取滑块区域，不截取整个页面（性能优化）
-        screenshot_bytes = await self._screenshot_captcha_area(page, captcha_info)
+        # 初始截图：整页视口（与 screencast 帧保持一致，客户端统一按 viewport 比例映射坐标）
+        screenshot_bytes = await page.screenshot(type='jpeg', quality=60, full_page=False)
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
         
         # 获取视口大小
@@ -48,19 +45,121 @@ class CaptchaRemoteController:
         self.active_sessions[session_id] = {
             'page': page,
             'screenshot': screenshot_base64,
-            'captcha_info': captcha_info,
+            'captcha_info': None,
             'completed': False,
-            'viewport': viewport
+            'viewport': viewport,
+            'cdp': None,
+            'screencast_ok': False,
         }
+
+        # 启动 CDP screencast 推流（浏览器主动推帧，替代逐事件截图）
+        await self._start_screencast(session_id)
         
         logger.info(f"✅ 创建远程控制会话: {session_id}")
         
         return {
             'session_id': session_id,
             'screenshot': screenshot_base64,
-            'captcha_info': captcha_info,
+            'captcha_info': None,
             'viewport': self.active_sessions[session_id]['viewport']
         }
+
+    async def _start_screencast(self, session_id: str) -> bool:
+        """启动 CDP screencast：浏览器主动推送压缩帧，弱机也能流畅"""
+        session = self.active_sessions.get(session_id)
+        if not session or not session.get('page'):
+            return False
+        page = session['page']
+        try:
+            cdp = await page.context.new_cdp_session(page)
+            session['cdp'] = cdp
+
+            def _on_frame(params):
+                asyncio.ensure_future(self._handle_screencast_frame(session_id, params))
+
+            cdp.on('Page.screencastFrame', _on_frame)
+            await cdp.send('Page.enable')
+            await cdp.send('Page.startScreencast', {
+                'format': 'jpeg',
+                'quality': 50,
+                'maxWidth': 720,
+                'maxHeight': 1440,
+            })
+            session['screencast_ok'] = True
+            logger.info(f"📡 CDP screencast 已启动: {session_id}")
+            return True
+        except Exception as e:
+            session['screencast_ok'] = False
+            logger.warning(f"CDP screencast 启动失败，回退截图轮询: {e}")
+            return False
+
+    async def _handle_screencast_frame(self, session_id: str, params: dict):
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        cdp = session.get('cdp')
+        # 必须逐帧 ack，否则浏览器停止推流
+        try:
+            if cdp:
+                await cdp.send('Page.screencastFrameAck', {'sessionId': params.get('sessionId')})
+        except Exception:
+            pass
+        data = params.get('data')
+        if not data:
+            return
+        session['screenshot'] = data
+        session['last_frame_ts'] = asyncio.get_event_loop().time()
+        n = session.setdefault('_frame_count', 0) + 1
+        session['_frame_count'] = n
+        if n == 1 or n % 50 == 0:
+            logger.info(f"📡 screencast 推帧中: {session_id} 已收 {n} 帧")
+        await self._broadcast_screenshot(session_id, data)
+
+    async def _broadcast_screenshot(self, session_id: str, b64: str):
+        ws = self.websocket_connections.get(session_id)
+        if ws is None:
+            return
+        try:
+            await ws.send_json({
+                'type': 'screenshot_update',
+                'screenshot': b64,
+                'viewport': self.active_sessions.get(session_id, {}).get('viewport'),
+            })
+        except Exception:
+            pass
+
+    def _maybe_snapshot_fallback(self, session_id: str):
+        """混合兜底：推流帧超过 0.6s 没到时，主动截一张补发，保证拖动始终有反馈"""
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        now = asyncio.get_event_loop().time()
+        if not session.get('screencast_ok'):
+            return  # 旧轮询模式由 API 层负责截图
+        if now - session.get('last_frame_ts', 0.0) < 0.6:
+            return
+        if session.get('_snapshot_inflight'):
+            return
+        session['_snapshot_inflight'] = True
+        asyncio.ensure_future(self._push_snapshot(session_id))
+
+    async def _push_snapshot(self, session_id: str):
+        session = self.active_sessions.get(session_id)
+        try:
+            if not session or not session.get('page'):
+                return
+            b64 = await self.update_screenshot(session_id, quality=45)
+            if b64:
+                await self._broadcast_screenshot(session_id, b64)
+        except Exception as e:
+            logger.debug(f"兜底截图失败: {e}")
+        finally:
+            if session:
+                session['_snapshot_inflight'] = False
+
+    def is_screencast_active(self, session_id: str) -> bool:
+        session = self.active_sessions.get(session_id)
+        return bool(session and session.get('screencast_ok'))
     
     async def _screenshot_captcha_area(self, page: Page, captcha_info: Dict[str, Any]) -> bytes:
         """截取整个验证码容器区域"""
@@ -216,15 +315,22 @@ class CaptchaRemoteController:
             if event_type == 'down':
                 await page.mouse.move(x, y)
                 await page.mouse.down()
-                logger.debug(f"鼠标按下: ({x}, {y})")
+                logger.info(f"🖱️ 鼠标按下: ({x}, {y})")
+                self._maybe_snapshot_fallback(session_id)
                 
             elif event_type == 'move':
+                # 节流：移动事件极密集，转发过快反而造成事件堆积
+                now = asyncio.get_event_loop().time()
+                _sess = self.active_sessions[session_id]
+                if now - _sess.get('_last_move', 0.0) < 0.03:
+                    return True
+                _sess['_last_move'] = now
                 await page.mouse.move(x, y)
-                logger.debug(f"鼠标移动: ({x}, {y})")
+                self._maybe_snapshot_fallback(session_id)
                 
             elif event_type == 'up':
                 await page.mouse.up()
-                logger.debug(f"鼠标释放: ({x}, {y})")
+                logger.info(f"🖱️ 鼠标释放: ({x}, {y})")
                 
             else:
                 logger.warning(f"未知事件类型: {event_type}")
@@ -327,7 +433,14 @@ class CaptchaRemoteController:
     async def close_session(self, session_id: str):
         """关闭会话"""
         if session_id in self.active_sessions:
-            del self.active_sessions[session_id]
+            session = self.active_sessions.pop(session_id)
+            cdp = session.get('cdp')
+            if cdp:
+                try:
+                    await cdp.send('Page.stopScreencast')
+                    await cdp.detach()
+                except Exception:
+                    pass
             logger.info(f"🔒 关闭远程控制会话: {session_id}")
     
     async def auto_refresh_screenshot(self, session_id: str, interval: float = 1.0):
@@ -336,6 +449,11 @@ class CaptchaRemoteController:
         
         while session_id in self.active_sessions and not self.is_completed(session_id):
             try:
+                # screencast 模式下由浏览器主动推帧，跳过轮询截图
+                if self.active_sessions[session_id].get('screencast_ok'):
+                    await asyncio.sleep(1)
+                    continue
+
                 current_time = asyncio.get_event_loop().time()
                 
                 # 使用自适应刷新：空闲时降低频率

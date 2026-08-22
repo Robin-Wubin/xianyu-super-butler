@@ -502,6 +502,9 @@ export interface SystemSettings {
   ai_model?: string;
   ai_api_key?: string;
   ai_base_url?: string;
+  // 远程浏览器（Chrome MCP）：启用后人工滑块验证在本机真实 Chrome 完成
+  mcp_browser_enabled?: string;
+  mcp_browser_url?: string;
   default_reply?: string;
   registration_enabled?: boolean;
   // 注册是否必须填邮箱验证码。没配 SMTP 时关掉，否则注册会卡在收不到验证码

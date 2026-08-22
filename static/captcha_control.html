@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>人工滑块验证</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #1a1a2e; color: #eee;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 20px;
+  }
+  h1 { font-size: 18px; margin-bottom: 8px; }
+  #status { font-size: 13px; color: #9aa; margin-bottom: 14px; min-height: 18px; }
+  #status.ok { color: #4caf50; font-weight: bold; }
+  #status.err { color: #f66; }
+  #shot-wrap {
+    position: relative; line-height: 0;
+    border: 2px solid #444; border-radius: 8px; overflow: hidden;
+    cursor: crosshair; user-select: none; touch-action: none;
+    background: #333; max-width: min(1400px, 96vw);
+  }
+  #shot {
+    display: block; width: 100%;
+    -webkit-user-drag: none;
+    pointer-events: none; /* 事件落在 wrap 上统一处理 */
+  }
+  #actions { margin-top: 16px; display: flex; gap: 12px; }
+  button {
+    background: #3b82f6; color: #fff; border: none; border-radius: 6px;
+    padding: 8px 20px; font-size: 14px; cursor: pointer;
+  }
+  button.secondary { background: #555; }
+  button:disabled { opacity: .5; cursor: default; }
+  #tip { margin-top: 12px; font-size: 12px; color: #889; text-align: center; max-width: 520px; }
+</style>
+</head>
+<body>
+  <h1>闲鱼滑块 - 人工验证</h1>
+  <div id="status">连接服务器…</div>
+  <div id="shot-wrap"><img id="shot" alt="验证码画面"></div>
+  <div id="actions">
+    <button id="refresh-btn" class="secondary" disabled>刷新画面</button>
+    <button id="check-btn" class="secondary" disabled>检查是否通过</button>
+  </div>
+  <div id="tip">按住滑块按钮横向拖动到最右侧完成验证（和真实滑块一样操作）。画面会跟随你的拖动实时刷新；验证通过后会自动提示。</div>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const session = params.get('session');
+  const statusEl = document.getElementById('status');
+  const wrap = document.getElementById('shot-wrap');
+  const img = document.getElementById('shot');
+  const refreshBtn = document.getElementById('refresh-btn');
+  const checkBtn = document.getElementById('check-btn');
+
+  // 截图裁剪区域在真实页面中的原点（旧模式：服务端截取 captcha 容器四周各留 10px）
+  let clipOrigin = null;   // {x, y}
+  // 新模式：screencast 全视口帧，按 viewport/naturalWidth 比例还原页面坐标
+  let viewport = null;     // {width, height}
+  let done = false;
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = cls || '';
+  }
+
+  if (!session) {
+    setStatus('缺少 session 参数', 'err');
+    return;
+  }
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/api/captcha/ws/${encodeURIComponent(session)}`);
+
+  ws.onopen = () => setStatus('已连接，等待画面…');
+  ws.onerror = () => setStatus('连接失败，请刷新重试', 'err');
+  ws.onclose = () => {
+    if (!done) setStatus('连接已断开（会话超时或已完成）', 'err');
+  };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === 'session_info') {
+      applyScreenshot(msg.screenshot);
+      const ci = msg.captcha_info;
+      if (ci && typeof ci.x === 'number') {
+        clipOrigin = {
+          x: Math.max(0, ci.x - 10),
+          y: Math.max(0, ci.y - 10),
+        };
+      }
+      if (msg.viewport && msg.viewport.width) viewport = msg.viewport;
+      setStatus('请拖动滑块完成验证');
+      refreshBtn.disabled = false;
+      checkBtn.disabled = false;
+    } else if (msg.type === 'screenshot_update') {
+      applyScreenshot(msg.screenshot);
+      if (msg.viewport && msg.viewport.width) viewport = msg.viewport;
+    } else if (msg.type === 'completed') {
+      done = true;
+      setStatus('✅ 验证成功！Cookie 已更新，可以关闭本页', 'ok');
+      wrap.style.borderColor = '#4caf50';
+    } else if (msg.type === 'completion_status') {
+      if (msg.completed) {
+        done = true;
+        setStatus('✅ 验证成功！Cookie 已更新，可以关闭本页', 'ok');
+        wrap.style.borderColor = '#4caf50';
+      } else {
+        setStatus('尚未通过，请继续拖动滑块重试');
+      }
+    } else if (msg.type === 'error') {
+      setStatus(msg.message || '会话错误', 'err');
+    }
+  };
+
+  function applyScreenshot(b64) {
+    if (!b64) return;
+    img.src = 'data:image/jpeg;base64,' + b64;
+  }
+
+  // 把 wrap 内的显示坐标换算成真实页面坐标
+  function toPageXY(ev) {
+    const rect = wrap.getBoundingClientRect();
+    const scaleX = (img.naturalWidth || rect.width) / rect.width;
+    const scaleY = (img.naturalHeight || rect.height) / rect.height;
+    const px = (ev.clientX - rect.left) * scaleX;
+    const py = (ev.clientY - rect.top) * scaleY;
+    if (viewport && img.naturalWidth) {
+      // screencast 全视口帧：帧像素 × (视口宽 / 帧宽) = 页面 CSS 坐标
+      const k = viewport.width / img.naturalWidth;
+      return { x: Math.round(px * k), y: Math.round(py * k) };
+    }
+    const ox = clipOrigin ? clipOrigin.x : 0;
+    const oy = clipOrigin ? clipOrigin.y : 0;
+    return { x: Math.round(ox + px), y: Math.round(oy + py) };
+  }
+
+  function sendMouseEvent(eventType, ev) {
+    if (ws.readyState !== WebSocket.OPEN || done) return;
+    const p = toPageXY(ev);
+    ws.send(JSON.stringify({ type: 'mouse_event', event_type: eventType, x: p.x, y: p.y }));
+  }
+
+  // move 事件节流：弱机上每次 move 都会触发服务端截图，太密会拖垮
+  let lastMoveSent = 0;
+  const MOVE_INTERVAL = 60;
+
+  let dragging = false;
+  wrap.addEventListener('mousedown', (ev) => {
+    if (done) return;
+    ev.preventDefault();
+    dragging = true;
+    sendMouseEvent('down', ev);
+  });
+  window.addEventListener('mousemove', (ev) => {
+    if (!dragging || done) return;
+    const now = performance.now();
+    if (now - lastMoveSent < MOVE_INTERVAL) return;
+    lastMoveSent = now;
+    sendMouseEvent('move', ev);
+  });
+  window.addEventListener('mouseup', (ev) => {
+    if (!dragging || done) return;
+    dragging = false;
+    sendMouseEvent('up', ev);
+  });
+
+  // 触屏支持（手机上也能拖）
+  wrap.addEventListener('touchstart', (ev) => {
+    if (done) return;
+    ev.preventDefault();
+    sendMouseEvent('down', ev.touches[0]);
+  }, { passive: false });
+  wrap.addEventListener('touchmove', (ev) => {
+    if (done) return;
+    ev.preventDefault();
+    const now = performance.now();
+    if (now - lastMoveSent < MOVE_INTERVAL) return;
+    lastMoveSent = now;
+    sendMouseEvent('move', ev.touches[0]);
+  }, { passive: false });
+  wrap.addEventListener('touchend', (ev) => {
+    if (done) return;
+    ev.preventDefault();
+    if (ev.changedTouches && ev.changedTouches[0]) {
+      sendMouseEvent('up', ev.changedTouches[0]);
+    } else {
+      // 无坐标的兜底：用 wrap 中心
+      sendMouseEvent('up', { clientX: wrap.getBoundingClientRect().left + 10, clientY: wrap.getBoundingClientRect().top + 10 });
+    }
+  }, { passive: false });
+
+  refreshBtn.addEventListener('click', () => {
+    // 触发一次零位移 move 让服务端回截图
+    if (ws.readyState === WebSocket.OPEN) {
+      const rect = wrap.getBoundingClientRect();
+      sendMouseEvent('move', { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
+    }
+  });
+
+  checkBtn.addEventListener('click', () => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'check_completion' }));
+      setStatus('检查中…');
+    }
+  });
+
+  // 保活心跳
+  setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping' }));
+    }
+  }, 20000);
+})();
+</script>
+</body>
+</html>
