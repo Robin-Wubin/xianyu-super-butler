@@ -833,8 +833,24 @@ const ItemList: React.FC = () => {
                       className="grid gap-4 px-4 py-4 transition-colors hover:bg-[#fffdf0] xl:grid-cols-[340px_140px_260px_210px_110px] xl:items-stretch xl:gap-0 xl:px-0 xl:[&>*]:flex xl:[&>*]:min-w-0 xl:[&>*]:flex-col xl:[&>*]:justify-center xl:[&>*]:border-r xl:[&>*]:border-gray-200 xl:[&>*]:px-4 xl:[&>*:first-child]:!flex-row xl:[&>*:first-child]:items-center xl:[&>*:last-child]:border-r-0"
                     >
                       <div className="flex min-w-0 gap-3">
-                        <div className="h-20 w-20 flex-none overflow-hidden rounded-md border border-gray-200 bg-gray-100">
+                        <div className="relative h-20 w-20 flex-none overflow-hidden rounded-md border border-gray-200 bg-gray-100">
                           <ItemImage item={item} />
+                          {isSold(item) && (
+                            <span
+                              className="absolute left-0 top-0 z-10 rounded-br-md bg-amber-500/95 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow-sm"
+                              title="闲鱼官方状态：已售出（itemStatus=1）"
+                            >
+                              已售出
+                            </span>
+                          )}
+                          {!isSold(item) && soldQty(item) > 0 && (
+                            <span
+                              className="absolute left-0 top-0 z-10 rounded-br-md bg-emerald-600/95 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white shadow-sm"
+                              title={`在售中，累计售出 ${soldQty(item)} 件（有效订单，已排除退款/关闭）`}
+                            >
+                              已售 {soldQty(item)}
+                            </span>
+                          )}
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex min-w-0 flex-wrap items-start gap-2">
@@ -843,22 +859,6 @@ const ItemList: React.FC = () => {
                             }`}>
                               {item.item_title || '未命名商品'}
                             </h3>
-                            {isSold(item) && (
-                              <span
-                                className="status-badge status-badge-warning shrink-0"
-                                title="闲鱼官方状态：已售出（itemStatus=1）"
-                              >
-                                已售出
-                              </span>
-                            )}
-                            {!isSold(item) && soldQty(item) > 0 && (
-                              <span
-                                className="status-badge shrink-0 bg-emerald-50 text-emerald-600"
-                                title={`在售中，累计售出 ${soldQty(item)} 件（有效订单，已排除退款/关闭）`}
-                              >
-                                销量 ×{soldQty(item)}
-                              </span>
-                            )}
                             {isOffShelf(item) && (
                               <span
                                 className="status-badge shrink-0 bg-gray-100 text-gray-500"
