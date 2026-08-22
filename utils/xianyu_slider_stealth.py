@@ -385,7 +385,7 @@ class XianyuSliderStealth:
         self.context = None
         self.playwright = None
         self._browser_slot_held = False  # 是否占用着全局浏览器槽位
-        self._stealth_engine = 'patchright' if PATCHRIGHT_AVAILABLE else 'playwright'
+        self._stealth_engine = 'playwright'  # 默认原生 playwright，见 init_browser 说明
         
         # 提取纯用户ID（移除时间戳部分）
         self.pure_user_id = concurrency_manager._extract_pure_user_id(user_id)
@@ -452,9 +452,13 @@ class XianyuSliderStealth:
                 browser_limit.acquire_slot("滑块验证")
                 self._browser_slot_held = True
 
-            # 启动 Playwright。优先 Patchright：同一份 Chromium 下它能把
-            # navigator.webdriver 从 true 变成 false，少掉一个最容易被查的标志。
-            if PATCHRIGHT_AVAILABLE:
+            # 启动 Playwright。2026-08 调整：默认改回原生 playwright ——
+            # patchright 会阉割 add_init_script，本类的隐身脚本
+            # （navigator.webdriver 等）在 patchright 下从未生效过，实测
+            # 反而问题更多。--disable-blink-features=AutomationControlled
+            # 已能让原生 playwright 下 navigator.webdriver 为 false。
+            # 需要时用环境变量 SLIDER_ENGINE=patchright 切回。
+            if PATCHRIGHT_AVAILABLE and os.environ.get("SLIDER_ENGINE", "playwright").strip().lower() == "patchright":
                 self.playwright = patchright_sync_playwright().start()
                 self._stealth_engine = 'patchright'
                 logger.info(f"【{self.pure_user_id}】Patchright 启动成功（反检测内核）")

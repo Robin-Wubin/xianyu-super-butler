@@ -180,17 +180,17 @@ async def open_manual_session(
     context = None
     refresh_task = None
     try:
-        # 反检测三件套：
-        # 1) patchright 引擎 —— playwright 的补丁版，抹掉 CDP 自动化痕迹
-        #    （navigator.webdriver、Runtime.enable 指纹等），对阿里 nc 有效；
+        # 反检测方案（2026-08 调整：默认改回原生 playwright）：
+        # 1) 原生 playwright + 全套 Windows 指纹伪装（browser_limit 统一注入
+        #    UA/platform/uaData/WebGL/cores）。patchright 虽抹 CDP 痕迹，但
+        #    阉割了 add_init_script 与 route.fulfill 脚本，注入式隐身全部失效，
+        #    实测问题更多；如需切回：环境变量 CAPTCHA_ENGINE=patchright；
         # 2) 有头模式 + Xvfb —— 无头 Chromium 的 WebGL 渲染器（SwiftShader）、
-        #    plugins、字体列表与真人浏览器差异巨大，拖得再像也会被判失败；
-        # 3) 不伪造 UA —— 之前写死 Windows Chrome UA，与 Linux 容器的
-        #    UA-CH / platform 指纹矛盾，反而是检测信号。
-        try:
+        #    plugins、字体列表与真人浏览器差异巨大，拖得再像也会被判失败。
+        if os.environ.get("CAPTCHA_ENGINE", "playwright").strip().lower() == "patchright":
             from patchright.async_api import async_playwright
             engine = "patchright"
-        except Exception:
+        else:
             from playwright.async_api import async_playwright
             engine = "playwright"
         _has_display = bool(os.environ.get("DISPLAY"))
