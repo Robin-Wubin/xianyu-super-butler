@@ -183,8 +183,17 @@ const ItemList: React.FC = () => {
 
   // ---- 商品级 AI 回复配置弹窗 ----
   const [aiModalItem, setAiModalItem] = useState<Item | null>(null);
-  const [aiCfg, setAiCfg] = useState<{ ai_enabled: number | null; custom_prompts: string; account_ai_enabled: boolean }>({
-    ai_enabled: null, custom_prompts: '', account_ai_enabled: false,
+  const [aiCfg, setAiCfg] = useState<{
+    ai_enabled: number | null;
+    custom_prompts: string;
+    max_discount_percent: number | null;
+    max_discount_amount: number | null;
+    max_bargain_rounds: number | null;
+    account: { ai_enabled: boolean; max_discount_percent: number; max_discount_amount: number; max_bargain_rounds: number };
+  }>({
+    ai_enabled: null, custom_prompts: '',
+    max_discount_percent: null, max_discount_amount: null, max_bargain_rounds: null,
+    account: { ai_enabled: false, max_discount_percent: 10, max_discount_amount: 100, max_bargain_rounds: 3 },
   });
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
@@ -197,7 +206,10 @@ const ItemList: React.FC = () => {
       setAiCfg({
         ai_enabled: cfg.ai_enabled ?? null,
         custom_prompts: cfg.custom_prompts || '',
-        account_ai_enabled: Boolean(cfg.account_ai_enabled),
+        max_discount_percent: cfg.max_discount_percent ?? null,
+        max_discount_amount: cfg.max_discount_amount ?? null,
+        max_bargain_rounds: cfg.max_bargain_rounds ?? null,
+        account: cfg.account,
       });
     } catch (error) {
       setNotice({ type: 'error', message: `获取AI配置失败：${(error as Error).message}` });
@@ -214,6 +226,9 @@ const ItemList: React.FC = () => {
       await updateItemAIConfig(aiModalItem.cookie_id, aiModalItem.item_id, {
         ai_enabled: aiCfg.ai_enabled,
         custom_prompts: aiCfg.custom_prompts.trim(),
+        max_discount_percent: aiCfg.max_discount_percent,
+        max_discount_amount: aiCfg.max_discount_amount,
+        max_bargain_rounds: aiCfg.max_bargain_rounds,
       });
       setNotice({ type: 'success', message: 'AI 回复配置已保存' });
       setAiModalItem(null);
@@ -1538,7 +1553,7 @@ const ItemList: React.FC = () => {
                       ai_enabled: event.target.value === '' ? null : Number(event.target.value),
                     }))}
                   >
-                    <option value="">跟随账号设置（当前账号：{aiCfg.account_ai_enabled ? '已开启' : '未开启'}）</option>
+                    <option value="">跟随账号设置（当前账号：{aiCfg.account.ai_enabled ? '已开启' : '未开启'}）</option>
                     <option value="1">强制开启（账号关了此商品也回复）</option>
                     <option value="0">强制关闭（账号开了此商品也不回复）</option>
                   </select>
@@ -1557,6 +1572,37 @@ const ItemList: React.FC = () => {
                   />
                   <p className="mt-1.5 text-xs text-gray-500">
                     会整体替换账号默认提示词（不是追加），系统仍会自动附带商品标题/价格/描述与议价规则。
+                  </p>
+                </div>
+                <div className="mt-4">
+                  <label className="mb-1.5 block text-sm font-bold text-gray-700">议价策略</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {([
+                      ['max_discount_percent', '最大折扣比例(%)'],
+                      ['max_discount_amount', '最大优惠金额(元)'],
+                      ['max_bargain_rounds', '最大议价轮次'],
+                    ] as const).map(([key, label]) => (
+                      <div key={key}>
+                        <span className="mb-1 block text-xs text-gray-500">{label}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          className="ios-input w-full rounded-md px-2 py-2 text-sm"
+                          value={aiCfg[key] ?? ''}
+                          placeholder={`跟随账号 ${aiCfg.account[key]}`}
+                          onChange={event => {
+                            const raw = event.target.value;
+                            setAiCfg(current => ({
+                              ...current,
+                              [key]: raw === '' ? null : Math.max(0, Number(raw)),
+                            }));
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-1.5 text-xs text-gray-500">
+                    留空 = 使用账号默认值（当前默认：比例 {aiCfg.account.max_discount_percent}%、金额 {aiCfg.account.max_discount_amount} 元、轮次 {aiCfg.account.max_bargain_rounds}）。
                   </p>
                 </div>
                 <div className="mt-5 flex justify-end gap-2">

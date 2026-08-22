@@ -5581,9 +5581,13 @@ def create_manual_item(
 
 
 class ItemAIConfigIn(BaseModel):
-    """商品级 AI 回复配置。ai_enabled: None=跟随账号, 0=强制关, 1=强制开"""
+    """商品级 AI 回复配置。ai_enabled: None=跟随账号, 0=强制关, 1=强制开；
+    议价参数为 None 时使用账号默认值"""
     ai_enabled: Optional[int] = None
     custom_prompts: str = ""
+    max_discount_percent: Optional[int] = None
+    max_discount_amount: Optional[int] = None
+    max_bargain_rounds: Optional[int] = None
 
 
 def _ensure_item_ownership(cookie_id: str, current_user: Dict[str, Any]) -> None:
@@ -5600,12 +5604,20 @@ def get_item_ai_config(cookie_id: str, item_id: str, current_user: Dict[str, Any
         _ensure_item_ownership(cookie_id, current_user)
         from app.db_manager import db_manager
         cfg = db_manager.get_item_ai_config(cookie_id, item_id)
-        # 账号级开关一并返回，前端展示「跟随账号」的实际效果
+        # 账号级设置一并返回，前端展示「跟随账号」时的实际生效值
         account = db_manager.get_ai_reply_settings(cookie_id)
         return {
             "ai_enabled": cfg.get("ai_enabled"),
             "custom_prompts": cfg.get("custom_prompts", ""),
-            "account_ai_enabled": bool(account.get("ai_enabled")),
+            "max_discount_percent": cfg.get("max_discount_percent"),
+            "max_discount_amount": cfg.get("max_discount_amount"),
+            "max_bargain_rounds": cfg.get("max_bargain_rounds"),
+            "account": {
+                "ai_enabled": bool(account.get("ai_enabled")),
+                "max_discount_percent": account.get("max_discount_percent", 10),
+                "max_discount_amount": account.get("max_discount_amount", 100),
+                "max_bargain_rounds": account.get("max_bargain_rounds", 3),
+            },
         }
     except HTTPException:
         raise
@@ -5621,8 +5633,16 @@ def update_item_ai_config(cookie_id: str, item_id: str, config: ItemAIConfigIn,
         _ensure_item_ownership(cookie_id, current_user)
         if config.ai_enabled not in (None, 0, 1):
             raise HTTPException(status_code=400, detail="ai_enabled 只能为 null/0/1")
+        # 议价参数合法性：要么不填（跟随账号），要么是非负数
+        for _field in ("max_discount_percent", "max_discount_amount", "max_bargain_rounds"):
+            _val = getattr(config, _field)
+            if _val is not None and _val < 0:
+                raise HTTPException(status_code=400, detail=f"{_field} 不能为负数")
         from app.db_manager import db_manager
-        if not db_manager.save_item_ai_config(cookie_id, item_id, config.ai_enabled, config.custom_prompts):
+        if not db_manager.save_item_ai_config(
+            cookie_id, item_id, config.ai_enabled, config.custom_prompts,
+            config.max_discount_percent, config.max_discount_amount, config.max_bargain_rounds,
+        ):
             raise HTTPException(status_code=500, detail="保存失败")
         return {"success": True, "message": "商品AI配置已保存"}
     except HTTPException:

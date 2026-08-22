@@ -189,12 +189,26 @@ class DBManager:
                 ai_enabled INTEGER,
                 -- 该商品专属提示词，空=使用账号默认提示词
                 custom_prompts TEXT DEFAULT '',
+                -- 商品级议价参数覆盖，NULL=使用账号默认值
+                max_discount_percent INTEGER,
+                max_discount_amount INTEGER,
+                max_bargain_rounds INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (cookie_id, item_id),
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
             )
             ''')
+
+            # 旧库迁移：item_ai_configs 的商品级议价参数列
+            try:
+                self._execute_sql(cursor, "SELECT max_discount_percent FROM item_ai_configs LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("正在为 item_ai_configs 表添加商品级议价参数列...")
+                self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_discount_percent INTEGER")
+                self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_discount_amount INTEGER")
+                self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_bargain_rounds INTEGER")
+                logger.info("item_ai_configs 议价参数列添加完成")
 
             # 创建AI对话历史表
             cursor.execute('''
@@ -2490,7 +2504,9 @@ class DBManager:
             with self.lock:
                 cursor = self.conn.cursor()
                 cursor.execute(
-                    'SELECT ai_enabled, custom_prompts FROM item_ai_configs WHERE cookie_id = ? AND item_id = ?',
+                    '''SELECT ai_enabled, custom_prompts, max_discount_percent,
+                              max_discount_amount, max_bargain_rounds
+                       FROM item_ai_configs WHERE cookie_id = ? AND item_id = ?''',
                     (cookie_id, item_id),
                 )
                 row = cursor.fetchone()
@@ -2499,24 +2515,39 @@ class DBManager:
                 return {
                     'ai_enabled': row[0],  # None=跟随, 0=关, 1=开
                     'custom_prompts': row[1] or '',
+                    'max_discount_percent': row[2],  # None=账号默认
+                    'max_discount_amount': row[3],
+                    'max_bargain_rounds': row[4],
                 }
         except Exception as e:
             logger.error(f"获取商品AI配置失败: {e}")
             return {}
 
-    def save_item_ai_config(self, cookie_id: str, item_id: str, ai_enabled, custom_prompts: str = '') -> bool:
-        """保存商品级 AI 回复配置。ai_enabled 传 None 表示跟随账号。"""
+    def save_item_ai_config(self, cookie_id: str, item_id: str, ai_enabled,
+                            custom_prompts: str = '',
+                            max_discount_percent=None,
+                            max_discount_amount=None,
+                            max_bargain_rounds=None) -> bool:
+        """保存商品级 AI 回复配置。ai_enabled 传 None 表示跟随账号；
+        议价参数传 None 表示使用账号默认值。"""
         try:
             with self.lock:
                 cursor = self.conn.cursor()
                 cursor.execute('''
-                INSERT INTO item_ai_configs (cookie_id, item_id, ai_enabled, custom_prompts, updated_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO item_ai_configs (
+                    cookie_id, item_id, ai_enabled, custom_prompts,
+                    max_discount_percent, max_discount_amount, max_bargain_rounds, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(cookie_id, item_id) DO UPDATE SET
                     ai_enabled = excluded.ai_enabled,
                     custom_prompts = excluded.custom_prompts,
+                    max_discount_percent = excluded.max_discount_percent,
+                    max_discount_amount = excluded.max_discount_amount,
+                    max_bargain_rounds = excluded.max_bargain_rounds,
                     updated_at = CURRENT_TIMESTAMP
-                ''', (cookie_id, item_id, ai_enabled, custom_prompts or ''))
+                ''', (cookie_id, item_id, ai_enabled, custom_prompts or '',
+                      max_discount_percent, max_discount_amount, max_bargain_rounds))
                 self.conn.commit()
                 return True
         except Exception as e:

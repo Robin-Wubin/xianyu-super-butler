@@ -650,10 +650,13 @@ class AIReplyEngine:
                     else:
                         logger.info(f"【{cookie_id}】当前消息是最新消息，开始处理 (时间:{message_created_at})")
                 
-                # 1. 获取AI回复设置；商品级专属提示词覆盖账号默认
+                # 1. 获取AI回复设置；商品级专属提示词与议价参数覆盖账号默认
                 settings = db_manager.get_ai_reply_settings(cookie_id)
                 if item_cfg.get('custom_prompts'):
                     settings['custom_prompts'] = item_cfg['custom_prompts']
+                for _bk in ('max_discount_percent', 'max_discount_amount', 'max_bargain_rounds'):
+                    if item_cfg.get(_bk) is not None:
+                        settings[_bk] = item_cfg[_bk]
 
                 # 3. 获取对话历史
                 context = []

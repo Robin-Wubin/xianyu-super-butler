@@ -826,18 +826,34 @@ export const getAccountAISettings = async (cookieId: string): Promise<AIReplySet
 }
 
 // 商品级 AI 回复配置
-export const getItemAIConfig = async (cookieId: string, itemId: string): Promise<{
+export interface ItemAIConfigData {
     ai_enabled: number | null;
     custom_prompts: string;
-    account_ai_enabled: boolean;
-}> => {
+    max_discount_percent: number | null;
+    max_discount_amount: number | null;
+    max_bargain_rounds: number | null;
+    account: {
+        ai_enabled: boolean;
+        max_discount_percent: number;
+        max_discount_amount: number;
+        max_bargain_rounds: number;
+    };
+}
+
+export const getItemAIConfig = async (cookieId: string, itemId: string): Promise<ItemAIConfigData> => {
     return get(`/items/ai-config/${cookieId}/${itemId}`);
 }
 
 export const updateItemAIConfig = async (
     cookieId: string,
     itemId: string,
-    config: { ai_enabled: number | null; custom_prompts: string },
+    config: {
+        ai_enabled: number | null;
+        custom_prompts: string;
+        max_discount_percent?: number | null;
+        max_discount_amount?: number | null;
+        max_bargain_rounds?: number | null;
+    },
 ): Promise<ApiResponse> => {
     return put(`/items/ai-config/${cookieId}/${itemId}`, config);
 }
