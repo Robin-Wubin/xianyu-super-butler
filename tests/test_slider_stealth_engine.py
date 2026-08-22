@@ -1,10 +1,10 @@
 """滑块的反检测内核选择与 Chromium 复用。
 
 回归两件事：
-1. 装了 Patchright 就必须用它 —— 同一份 Chromium 下 Playwright 会把
-   navigator.webdriver 暴露成 true，这是最容易被查的自动化标志。
-2. Chromium 可执行文件要能从现成安装里解析出来。Patchright 与 Playwright
-   各自绑定不同 revision，让它自己下载会平白多几百 MB 且国内常拉不动。
+1. 引擎固定为原生 playwright —— patchright 已弃用（它阉割 add_init_script，
+   隐身脚本从未生效）；webdriver 标志由 --disable-blink-features=
+   AutomationControlled + 隐身脚本注入处理。
+2. Chromium 可执行文件要能从现成安装里解析出来，避免重复下载。
 """
 
 import os
@@ -73,29 +73,25 @@ class StealthEngineSelectionTests(unittest.TestCase):
         instance.page = instance.context = instance.browser = instance.playwright = None
         return instance
 
-    def test_patchright_is_preferred_when_available(self):
+    def test_playwright_is_the_only_engine(self):
+        # patchright 已弃用（阉割 add_init_script，隐身脚本从未生效）
         instance = self._make_instance()
-        instance._stealth_engine = (
-            "patchright" if slider.PATCHRIGHT_AVAILABLE else "playwright"
-        )
-
-        if slider.PATCHRIGHT_AVAILABLE:
-            self.assertEqual(instance._stealth_engine, "patchright")
-        else:
-            self.assertEqual(instance._stealth_engine, "playwright")
+        instance._stealth_engine = "playwright"
+        self.assertEqual(instance._stealth_engine, "playwright")
+        self.assertFalse(slider.PATCHRIGHT_AVAILABLE)
 
     def test_engine_marker_is_set_before_launch(self):
         # 回退分支的日志会读这个字段，不能等到 init_browser 才有值
         with patch.object(slider.XianyuSliderStealth, "_check_date_validity", return_value=True):
             instance = slider.XianyuSliderStealth(user_id="acc", enable_learning=False)
         try:
-            self.assertIn(instance._stealth_engine, {"patchright", "playwright"})
+            self.assertEqual(instance._stealth_engine, "playwright")
         finally:
             slider.concurrency_manager.unregister_instance(instance.user_id)
 
-    def test_patchright_import_is_declared_in_requirements(self):
+    def test_patchright_is_removed_from_requirements(self):
         text = Path("requirements.txt").read_text(encoding="utf-8")
-        self.assertIn("patchright", text)
+        self.assertNotIn("patchright", text)
 
 
 if __name__ == "__main__":

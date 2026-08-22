@@ -96,6 +96,8 @@ _WIN_FINGERPRINT_JS = r"""
     }
     return false;
   };
+  // 原生 playwright 下 navigator.webdriver 为 true，必须隐藏
+  try { def(navigator, 'webdriver', () => false); } catch (e) {}
   def(navigator, 'platform', () => 'Win32');
   try {
     if (navigator.userAgentData) {
@@ -309,6 +311,9 @@ async def launch_browser(
             # 「正常电脑必有 WebGL」的检测露馅；显式启用软件渲染
             if '--enable-unsafe-swiftshader' not in args:
                 args.append('--enable-unsafe-swiftshader')
+            # 隐藏 navigator.webdriver 自动化标志
+            if '--disable-blink-features=AutomationControlled' not in args:
+                args.append('--disable-blink-features=AutomationControlled')
             opts['args'] = args
             # Windows 指纹伪装（调用方未显式指定 UA 时）
             _inject_fp = False
@@ -336,10 +341,13 @@ async def launch_browser(
             # 注意 persistent context 自带的初始页面早于 add_init_script
             # 存在，要立即对已有页面补一次注入。
             if _inject_fp:
-                # patchright 阉割了 add_init_script；route.fulfill 回填的
-                # 页面脚本也不执行。可行的通道只剩逐 frame evaluate
-                # （见 apply_windows_fingerprint），由调用方在页面/iframe
-                # 就绪后调用。
+                # 原生 playwright 的 add_init_script 可用：自动覆盖所有
+                # frame（含阿里滑块 iframe）。（patchright 曾把它阉割，已弃用；
+                # 旧的逐 frame evaluate 保留在 apply_windows_fingerprint 兜底）
+                try:
+                    await browser.add_init_script(_WIN_FINGERPRINT_JS)
+                except Exception:
+                    pass
                 # navigator.platform 是 LegacyUnforgeable 属性，JS 层覆盖不了，
                 # 必须走 CDP Emulation.setUserAgentOverride（Playwright 自己
                 # 设 UA 就是这个通道，不会引入额外检测面）

@@ -22,15 +22,11 @@ from loguru import logger
 
 from utils import browser_limit
 
-# 滑块优先用 Patchright —— Playwright 的反检测分支，修掉了 CDP 层面的自动化痕迹。
-# 实测同一份 Chromium：Playwright 下 navigator.webdriver 为 true（最基础也最致命的
-# 自动化标志），Patchright 下为 false。API 与 Playwright 完全兼容，装不上就回退。
-try:
-    from patchright.sync_api import sync_playwright as patchright_sync_playwright
-    PATCHRIGHT_AVAILABLE = True
-except ImportError:
-    patchright_sync_playwright = None
-    PATCHRIGHT_AVAILABLE = False
+# 反检测引擎：原生 playwright。曾试用 patchright（抹 CDP 痕迹），但它阉割
+# add_init_script，本类的隐身脚本（navigator.webdriver 等）从未生效过，
+# 2026-08 已弃用。--disable-blink-features=AutomationControlled +
+# 隐身脚本注入在原生 playwright 下同样能把 webdriver 置为 false。
+PATCHRIGHT_AVAILABLE = False
 
 # 导入配置
 try:
@@ -452,21 +448,12 @@ class XianyuSliderStealth:
                 browser_limit.acquire_slot("滑块验证")
                 self._browser_slot_held = True
 
-            # 启动 Playwright。2026-08 调整：默认改回原生 playwright ——
-            # patchright 会阉割 add_init_script，本类的隐身脚本
-            # （navigator.webdriver 等）在 patchright 下从未生效过，实测
-            # 反而问题更多。--disable-blink-features=AutomationControlled
-            # 已能让原生 playwright 下 navigator.webdriver 为 false。
-            # 需要时用环境变量 SLIDER_ENGINE=patchright 切回。
-            if PATCHRIGHT_AVAILABLE and os.environ.get("SLIDER_ENGINE", "playwright").strip().lower() == "patchright":
-                self.playwright = patchright_sync_playwright().start()
-                self._stealth_engine = 'patchright'
-                logger.info(f"【{self.pure_user_id}】Patchright 启动成功（反检测内核）")
-            else:
-                logger.info(f"【{self.pure_user_id}】启动Playwright...")
-                self.playwright = sync_playwright().start()
-                self._stealth_engine = 'playwright'
-                logger.info(f"【{self.pure_user_id}】Playwright启动成功")
+            # 启动原生 Playwright（patchright 已弃用：阉割 add_init_script，
+            # 隐身脚本从未生效，见文件头部说明）
+            logger.info(f"【{self.pure_user_id}】启动Playwright...")
+            self.playwright = sync_playwright().start()
+            self._stealth_engine = 'playwright'
+            logger.info(f"【{self.pure_user_id}】Playwright启动成功")
             
             # 随机选择浏览器特征
             browser_features = self._get_random_browser_features()

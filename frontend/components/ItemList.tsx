@@ -309,8 +309,11 @@ const ItemList: React.FC = () => {
   // 但不能直接删 —— 专属发货配置挂在商品上，重新上架还要接着用。
   // （展示由「在售/已下架」筛选下拉控制）
 
-  const isOffShelf = (item: Item) => item.listing_status === 'off_shelf';
-  // 已售出判定：只认闲鱼原始数据的 itemStatus（1=已售出，0=在售）。
+  // 上下架判定以闲鱼原始 itemStatus 为准：0=在售，1=下架（已售出会下架）。
+  // listing_status（本地根据「闲鱼列表是否还返回该商品」推导）仅作为
+  // 缺少 item_status 的旧数据/手动商品的兜底。
+  const isOffShelf = (item: Item) => item.item_status === 1 || item.listing_status === 'off_shelf';
+  // 已售出判定：只认闲鱼原始数据的 itemStatus（1=已售出/下架，0=在售）。
   // 订单交叉统计不能作为判定：在售商品可以反复成交多次，有历史订单
   // 不代表已下架售罄。sold_qty 仅作为「累计销量」展示。
   const soldQty = (item: Item) => (item.sold_qty ?? item.sold_count ?? 0) as number;
@@ -326,8 +329,7 @@ const ItemList: React.FC = () => {
     [accountScopedItems],
   );
 
-  // 上下架筛选：三态（全部 / 在售=上架 / 已下架）。
-  // 已下架默认不勾进「全部」以外的混淆：徽标已区分已售出，筛选只管上架状态。
+  // 上下架筛选：三态（全部 / 在售=item_status 0 / 已下架=item_status 1）。
   const [listingFilter, setListingFilter] = useState<'all' | 'on' | 'off'>('all');
 
   const visibleItems = useMemo(
@@ -920,7 +922,7 @@ const ItemList: React.FC = () => {
                             }`}>
                               {item.item_title || '未命名商品'}
                             </h3>
-                            {isOffShelf(item) && (
+                            {!isSold(item) && isOffShelf(item) && (
                               <span
                                 className="status-badge shrink-0 bg-gray-100 text-gray-500"
                                 title={
