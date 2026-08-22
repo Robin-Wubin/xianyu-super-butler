@@ -600,7 +600,14 @@ class AIReplyEngine:
                       cookie_id: str, user_id: str, item_id: str,
                       skip_wait: bool = False) -> Optional[str]:
         """生成AI回复"""
-        if not self.is_ai_enabled(cookie_id):
+        # 商品级配置优先：单商品可强制开/关，覆盖账号级开关
+        item_cfg = db_manager.get_item_ai_config(cookie_id, item_id or '')
+        item_force_on = item_cfg.get('ai_enabled') == 1
+        item_force_off = item_cfg.get('ai_enabled') == 0
+        if item_force_off:
+            logger.debug(f"商品级AI已强制关闭: 账号={cookie_id}, item={item_id}")
+            return None
+        if not item_force_on and not self.is_ai_enabled(cookie_id):
             return None
         if self.is_system_or_order_event(message):
             logger.info(f"系统/订单事件绕过AI回复: 账号={cookie_id}, chat_id={chat_id}")
@@ -643,8 +650,10 @@ class AIReplyEngine:
                     else:
                         logger.info(f"【{cookie_id}】当前消息是最新消息，开始处理 (时间:{message_created_at})")
                 
-                # 1. 获取AI回复设置
+                # 1. 获取AI回复设置；商品级专属提示词覆盖账号默认
                 settings = db_manager.get_ai_reply_settings(cookie_id)
+                if item_cfg.get('custom_prompts'):
+                    settings['custom_prompts'] = item_cfg['custom_prompts']
 
                 # 3. 获取对话历史
                 context = []

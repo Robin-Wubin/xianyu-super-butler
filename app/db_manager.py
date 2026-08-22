@@ -179,6 +179,23 @@ class DBManager:
             )
             ''')
 
+            # 商品级 AI 回复覆盖配置：同一账号下不同商品可以单独
+            # 开/关 AI 回复、使用不同的回复策略（专属提示词）。
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS item_ai_configs (
+                cookie_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                -- 三态：NULL=跟随账号设置，0=强制关闭，1=强制开启
+                ai_enabled INTEGER,
+                -- 该商品专属提示词，空=使用账号默认提示词
+                custom_prompts TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (cookie_id, item_id),
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
+            )
+            ''')
+
             # 创建AI对话历史表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS ai_conversations (
@@ -2466,6 +2483,45 @@ class DBManager:
                 logger.error(f"保存AI回复设置失败: {e}")
                 self.conn.rollback()
                 return False
+
+    def get_item_ai_config(self, cookie_id: str, item_id: str) -> dict:
+        """获取商品级 AI 回复配置（不存在时返回空字典=全部跟随账号）"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT ai_enabled, custom_prompts FROM item_ai_configs WHERE cookie_id = ? AND item_id = ?',
+                    (cookie_id, item_id),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return {}
+                return {
+                    'ai_enabled': row[0],  # None=跟随, 0=关, 1=开
+                    'custom_prompts': row[1] or '',
+                }
+        except Exception as e:
+            logger.error(f"获取商品AI配置失败: {e}")
+            return {}
+
+    def save_item_ai_config(self, cookie_id: str, item_id: str, ai_enabled, custom_prompts: str = '') -> bool:
+        """保存商品级 AI 回复配置。ai_enabled 传 None 表示跟随账号。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                INSERT INTO item_ai_configs (cookie_id, item_id, ai_enabled, custom_prompts, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(cookie_id, item_id) DO UPDATE SET
+                    ai_enabled = excluded.ai_enabled,
+                    custom_prompts = excluded.custom_prompts,
+                    updated_at = CURRENT_TIMESTAMP
+                ''', (cookie_id, item_id, ai_enabled, custom_prompts or ''))
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"保存商品AI配置失败: {e}")
+            return False
 
     def get_ai_reply_settings(self, cookie_id: str) -> dict:
         """获取AI回复设置

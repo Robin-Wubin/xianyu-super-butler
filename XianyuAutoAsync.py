@@ -4730,9 +4730,12 @@ class XianyuLive:
         try:
             from app.ai_reply_engine import ai_reply_engine
 
-            # 检查是否启用AI回复
-            if not ai_reply_engine.is_ai_enabled(self.cookie_id):
-                logger.warning(f"账号 {self.cookie_id} 未启用AI回复")
+            # 检查是否启用AI回复：账号级开关 或 商品级强制开启
+            from app.db_manager import db_manager
+            _item_ai_cfg = db_manager.get_item_ai_config(self.cookie_id, item_id or '')
+            _item_force_on = _item_ai_cfg.get('ai_enabled') == 1
+            if not _item_force_on and not ai_reply_engine.is_ai_enabled(self.cookie_id):
+                logger.debug(f"账号 {self.cookie_id} 与商品 {item_id} 均未启用AI回复")
                 return None
 
             # 从数据库获取商品信息

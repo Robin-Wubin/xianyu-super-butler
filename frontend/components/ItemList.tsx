@@ -31,6 +31,8 @@ import {
   getCards,
   getItemDeliveryConfig,
   getItemDeliveryConfigs,
+  getItemAIConfig,
+  updateItemAIConfig,
   getItems,
   getShippingRules,
   saveItemDeliveryConfig,
@@ -178,6 +180,50 @@ const Toggle: React.FC<{
 
 const ItemList: React.FC = () => {
   const [items, setItems] = useState<Item[]>([]);
+
+  // ---- 商品级 AI 回复配置弹窗 ----
+  const [aiModalItem, setAiModalItem] = useState<Item | null>(null);
+  const [aiCfg, setAiCfg] = useState<{ ai_enabled: number | null; custom_prompts: string; account_ai_enabled: boolean }>({
+    ai_enabled: null, custom_prompts: '', account_ai_enabled: false,
+  });
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
+
+  const openAiConfig = async (item: Item) => {
+    setAiModalItem(item);
+    setAiLoading(true);
+    try {
+      const cfg = await getItemAIConfig(item.cookie_id, item.item_id);
+      setAiCfg({
+        ai_enabled: cfg.ai_enabled ?? null,
+        custom_prompts: cfg.custom_prompts || '',
+        account_ai_enabled: Boolean(cfg.account_ai_enabled),
+      });
+    } catch (error) {
+      setNotice({ type: 'error', message: `获取AI配置失败：${(error as Error).message}` });
+      setAiModalItem(null);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const saveAiConfig = async () => {
+    if (!aiModalItem) return;
+    setAiSaving(true);
+    try {
+      await updateItemAIConfig(aiModalItem.cookie_id, aiModalItem.item_id, {
+        ai_enabled: aiCfg.ai_enabled,
+        custom_prompts: aiCfg.custom_prompts.trim(),
+      });
+      setNotice({ type: 'success', message: 'AI 回复配置已保存' });
+      setAiModalItem(null);
+      setItems(await getItems());
+    } catch (error) {
+      setNotice({ type: 'error', message: `保存失败：${(error as Error).message}` });
+    } finally {
+      setAiSaving(false);
+    }
+  };
   const [accounts, setAccounts] = useState<AccountDetail[]>([]);
   const rootRef = useRef<HTMLDivElement>(null);
   const [cards, setCards] = useState<Card[]>([]);
@@ -950,6 +996,22 @@ const ItemList: React.FC = () => {
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
+                          <span className="text-xs font-semibold text-gray-600">AI 回复</span>
+                          <button
+                            type="button"
+                            onClick={() => openAiConfig(item)}
+                            className="rounded px-1.5 py-0.5 text-xs font-bold hover:bg-gray-100"
+                            title="配置该商品的 AI 回复开关与专属提示词"
+                          >
+                            {(() => {
+                              const cfg = item.ai_config;
+                              if (cfg?.ai_enabled === 1) return <span className="text-green-600">已开启{cfg.has_custom_prompts ? ' ·定制' : ''} ›</span>;
+                              if (cfg?.ai_enabled === 0) return <span className="text-gray-400">已关闭 ›</span>;
+                              return <span className="text-gray-500">跟随账号 ›</span>;
+                            })()}
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
                           <span className="text-xs font-semibold text-gray-600" title="买家一次买 N 件时是否发 N 份">
                             多数量
                           </span>
@@ -1449,6 +1511,70 @@ const ItemList: React.FC = () => {
                 添加商品
               </button>
             </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* 商品级 AI 回复配置弹窗 */}
+      {aiModalItem && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
+            <h3 className="text-base font-bold text-gray-900">AI 回复 · {aiModalItem.item_title || aiModalItem.item_id}</h3>
+            {aiLoading ? (
+              <div className="flex items-center justify-center gap-2 py-10 text-sm text-gray-500">
+                <Loader2 className="h-4 w-4 animate-spin" /> 加载配置中…
+              </div>
+            ) : (
+              <>
+                <div className="mt-4">
+                  <label className="mb-1.5 block text-sm font-bold text-gray-700" htmlFor="item-ai-mode">回复开关</label>
+                  <select
+                    id="item-ai-mode"
+                    className="ios-input w-full rounded-md px-3 py-2.5"
+                    value={aiCfg.ai_enabled === null ? '' : String(aiCfg.ai_enabled)}
+                    onChange={event => setAiCfg(current => ({
+                      ...current,
+                      ai_enabled: event.target.value === '' ? null : Number(event.target.value),
+                    }))}
+                  >
+                    <option value="">跟随账号设置（当前账号：{aiCfg.account_ai_enabled ? '已开启' : '未开启'}）</option>
+                    <option value="1">强制开启（账号关了此商品也回复）</option>
+                    <option value="0">强制关闭（账号开了此商品也不回复）</option>
+                  </select>
+                </div>
+                <div className="mt-4">
+                  <label className="mb-1.5 block text-sm font-bold text-gray-700" htmlFor="item-ai-prompts">
+                    专属回复策略（提示词）
+                  </label>
+                  <textarea
+                    id="item-ai-prompts"
+                    rows={7}
+                    className="ios-input w-full resize-y rounded-md px-3 py-2.5 font-mono text-xs"
+                    placeholder={'留空 = 使用账号默认提示词。\n例如：你是二手显卡卖家，语气专业冷静；只在买家确认价格后才发付款链接；不主动让价。'}
+                    value={aiCfg.custom_prompts}
+                    onChange={event => setAiCfg(current => ({ ...current, custom_prompts: event.target.value }))}
+                  />
+                  <p className="mt-1.5 text-xs text-gray-500">
+                    会整体替换账号默认提示词（不是追加），系统仍会自动附带商品标题/价格/描述与议价规则。
+                  </p>
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                  <button type="button" onClick={() => setAiModalItem(null)} className="ios-btn-secondary rounded-md px-4 py-2.5" disabled={aiSaving}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveAiConfig}
+                    disabled={aiSaving}
+                    className="ios-btn-primary flex items-center gap-2 rounded-md px-4 py-2.5"
+                  >
+                    {aiSaving && <Loader2 className="h-4 w-4 animate-spin" />}
+                    保存
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>,
         document.body,

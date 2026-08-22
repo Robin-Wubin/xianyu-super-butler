@@ -5451,6 +5451,33 @@ def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
             if status is not None:
                 item['item_status'] = int(status)
 
+        # 商品级 AI 回复配置（跟随账号/强制开/强制关 + 专属提示词标记）
+        try:
+            ai_cookie_ids = list(user_cookies.keys())
+            if ai_cookie_ids:
+                ai_placeholders = ','.join('?' * len(ai_cookie_ids))
+                with db_manager.lock:
+                    cursor = db_manager.conn.cursor()
+                    cursor.execute(
+                        f'''SELECT cookie_id, item_id, ai_enabled,
+                               LENGTH(COALESCE(custom_prompts, '')) AS prompt_len
+                        FROM item_ai_configs
+                        WHERE cookie_id IN ({ai_placeholders})''',
+                        tuple(ai_cookie_ids),
+                    )
+                    ai_cfg_map = {
+                        (str(r[0]), str(r[1])): {'ai_enabled': r[2], 'has_custom_prompts': bool(r[3])}
+                        for r in cursor.fetchall()
+                    }
+            else:
+                ai_cfg_map = {}
+            for item in all_items:
+                cfg = ai_cfg_map.get((str(item.get('cookie_id')), str(item.get('item_id'))))
+                if cfg:
+                    item['ai_config'] = cfg
+        except Exception as exc:
+            logger.warning(f"读取商品AI配置失败（忽略）: {exc}")
+
         # 订单交叉统计作为辅助：itemStatus 缺失（旧数据/手动商品）时，
         # orders 表有成交记录（排除退款/关闭）也视为已售出
         try:
@@ -5551,6 +5578,57 @@ def create_manual_item(
     except Exception as e:
         logger.exception("手动添加商品失败")
         raise HTTPException(status_code=500, detail=f"手动添加商品失败: {str(e)}")
+
+
+class ItemAIConfigIn(BaseModel):
+    """商品级 AI 回复配置。ai_enabled: None=跟随账号, 0=强制关, 1=强制开"""
+    ai_enabled: Optional[int] = None
+    custom_prompts: str = ""
+
+
+def _ensure_item_ownership(cookie_id: str, current_user: Dict[str, Any]) -> None:
+    from app.db_manager import db_manager
+    user_cookies = db_manager.get_all_cookies(current_user["user_id"])
+    if cookie_id not in user_cookies:
+        raise HTTPException(status_code=403, detail="无权操作该闲鱼账号的商品")
+
+
+@app.get("/items/ai-config/{cookie_id}/{item_id}")
+def get_item_ai_config(cookie_id: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取商品级 AI 回复配置"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.db_manager import db_manager
+        cfg = db_manager.get_item_ai_config(cookie_id, item_id)
+        # 账号级开关一并返回，前端展示「跟随账号」的实际效果
+        account = db_manager.get_ai_reply_settings(cookie_id)
+        return {
+            "ai_enabled": cfg.get("ai_enabled"),
+            "custom_prompts": cfg.get("custom_prompts", ""),
+            "account_ai_enabled": bool(account.get("ai_enabled")),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取商品AI配置失败: {str(e)}")
+
+
+@app.put("/items/ai-config/{cookie_id}/{item_id}")
+def update_item_ai_config(cookie_id: str, item_id: str, config: ItemAIConfigIn,
+                          current_user: Dict[str, Any] = Depends(get_current_user)):
+    """保存商品级 AI 回复配置"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        if config.ai_enabled not in (None, 0, 1):
+            raise HTTPException(status_code=400, detail="ai_enabled 只能为 null/0/1")
+        from app.db_manager import db_manager
+        if not db_manager.save_item_ai_config(cookie_id, item_id, config.ai_enabled, config.custom_prompts):
+            raise HTTPException(status_code=500, detail="保存失败")
+        return {"success": True, "message": "商品AI配置已保存"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存商品AI配置失败: {str(e)}")
 
 
 class ProductVariantBindingIn(BaseModel):

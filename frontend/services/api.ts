@@ -825,6 +825,23 @@ export const getAccountAISettings = async (cookieId: string): Promise<AIReplySet
     return get(`/ai-reply-settings/${cookieId}`);
 }
 
+// 商品级 AI 回复配置
+export const getItemAIConfig = async (cookieId: string, itemId: string): Promise<{
+    ai_enabled: number | null;
+    custom_prompts: string;
+    account_ai_enabled: boolean;
+}> => {
+    return get(`/items/ai-config/${cookieId}/${itemId}`);
+}
+
+export const updateItemAIConfig = async (
+    cookieId: string,
+    itemId: string,
+    config: { ai_enabled: number | null; custom_prompts: string },
+): Promise<ApiResponse> => {
+    return put(`/items/ai-config/${cookieId}/${itemId}`, config);
+}
+
 export const updateAccountAISettings = async (cookieId: string, settings: Partial<AIReplySettings>): Promise<ApiResponse> => {
   const payload = {
     ai_enabled: settings.ai_enabled ?? false,
