@@ -54,4 +54,40 @@ else
     echo "[entrypoint] 已回退 SLIDER_HEADLESS=true"
 fi
 
+# patchright 与 playwright 各自锁定不同 Chromium 版本目录（如 1234 vs
+# 1223），但镜像只为 playwright 装了浏览器。patchright 的补丁在驱动层，
+# 浏览器二进制与相邻版本协议兼容 —— 把它缺的版本目录软链到已安装的
+# 最高版本，免去在镜像里重复下载一份 500MB 的 Chromium。
+link_missing_browsers() {
+    [ -d /ms-playwright ] || return 0
+    for name in chromium chromium_headless_shell; do
+        target=$(ls -d /ms-playwright/"${name}"-* 2>/dev/null | sort -V | tail -1)
+        [ -n "$target" ] || continue
+        base=${target#/ms-playwright/}
+        # 找出所有「同名但版本目录不存在」的需求：从 patchright 的
+        # browsers.json 读取期望 revision，逐个链接
+        for pref in /opt/venv/lib/python*/site-packages/patchright/driver/package/browsers.json; do
+            [ -f "$pref" ] || continue
+            for wantrev in $(python - "$pref" 2>/dev/null <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for b in data.get("browsers", []):
+    n = b.get("name", "").replace("-headless-shell", "_headless_shell")
+    if n in ("chromium", "chromium_headless_shell"):
+        print(b.get("revision"))
+PY
+            ); do
+                link=/ms-playwright/${name}-${wantrev}
+                if [ ! -e "$link" ]; then
+                    ln -s "$target" "$link" && echo "[entrypoint] 浏览器兼容链接: ${name}-${wantrev} -> ${base}"
+                fi
+            done
+        done
+    done
+}
+link_missing_browsers
+
 exec python Start.py
