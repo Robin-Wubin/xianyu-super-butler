@@ -1,9 +1,14 @@
 from __future__ import annotations
 import asyncio
+import time
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Dict, List, Tuple, Optional
 from loguru import logger
 from app.db_manager import db_manager
+
+# failed 自愈的退避计数：{cookie_id: 连续重启次数}
+_restart_attempts: Dict[str, int] = {}
+task_started_at: Dict[str, float] = {}
 
 __all__ = ["CookieManager", "manager"]
 
@@ -118,8 +123,10 @@ class CookieManager:
     def _register_task(self, cookie_id: str, task: asyncio.Task) -> asyncio.Task:
         """登记账号任务，并在任务退出时输出可诊断日志。"""
         self.tasks[cookie_id] = task
+        task_started_at[cookie_id] = time.monotonic()
 
         def _on_done(done_task: asyncio.Task):
+            runtime = time.monotonic() - task_started_at.get(cookie_id, 0)
             if done_task.cancelled():
                 logger.info(f"【{cookie_id}】账号监听任务已停止")
                 return
@@ -131,6 +138,47 @@ class CookieManager:
                 logger.error(f"【{cookie_id}】账号监听任务异常退出: {error}")
             else:
                 logger.warning(f"【{cookie_id}】账号监听任务已退出，可重新登录或启用账号以重启")
+
+            # ==================== failed 自愈 ====================
+            # 5 连败后 main() 退出，任务停在 failed 终态无人拉起，
+            # 账号会静默停摆（2026-08 实际发生过：停了近两天才发现）。
+            # 这里在「任务非取消退出 + 账号仍启用」时按指数退避自动重启：
+            # 10min → 20 → 40 → 60（封顶），任务存活超过 10 分钟视为
+            # 一次成功运行，退避计数归零。取消（用户手动停用/换 Cookie）
+            # 不重启。
+            if not self.cookie_status.get(cookie_id, True):
+                logger.info(f"【{cookie_id}】账号已停用，不自愈重启")
+                return
+            if runtime >= 600:
+                _restart_attempts[cookie_id] = 0
+                logger.info(f"【{cookie_id}】上次任务存活 {int(runtime)} 秒，自愈退避计数已归零")
+            _restart_attempts[cookie_id] = _restart_attempts.get(cookie_id, 0) + 1
+            attempt = _restart_attempts[cookie_id]
+            delay = min(600 * (2 ** (attempt - 1)), 3600)
+            logger.warning(
+                f"【{cookie_id}】账号监听任务退出，{delay} 秒后自动重启"
+                f"（自愈第 {attempt} 次）"
+            )
+
+            async def _delayed_restart():
+                await asyncio.sleep(delay)
+                # 重启前再校验：期间用户可能已停用账号或手动启了新任务
+                if not self.cookie_status.get(cookie_id, True):
+                    logger.info(f"【{cookie_id}】自愈重启前发现账号已停用，放弃")
+                    return
+                current = self.tasks.get(cookie_id)
+                if current and not current.done():
+                    logger.info(f"【{cookie_id}】已有新任务在运行，跳过自愈重启")
+                    return
+                if cookie_id not in self.cookies:
+                    logger.warning(f"【{cookie_id}】Cookie 已不存在，放弃自愈重启")
+                    return
+                logger.info(f"【{cookie_id}】开始自愈重启监听任务...")
+                self._start_cookie_task(cookie_id)
+
+            asyncio.get_running_loop().create_task(
+                _delayed_restart(), name=f"xianyu-autoheal-{cookie_id}"
+            )
 
         task.add_done_callback(_on_done)
         return task
