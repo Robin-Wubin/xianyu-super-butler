@@ -444,10 +444,10 @@ const Settings: React.FC = () => {
             <SettingToggle
               title="启用自动擦亮"
               description="开启后按下方间隔自动擦亮全部商品。也可在商品页手动触发。"
-              checked={settings.auto_polish_enabled === true}
+              checked={toBool(settings.auto_polish_enabled)}
               onChange={() => setSettings({
                 ...settings,
-                auto_polish_enabled: settings.auto_polish_enabled !== true,
+                auto_polish_enabled: !toBool(settings.auto_polish_enabled),
               })}
             />
             <div className="grid gap-4 p-4 sm:grid-cols-2">
@@ -455,7 +455,7 @@ const Settings: React.FC = () => {
                 <span className="field-label">擦亮间隔（小时）</span>
                 <input
                   type="number"
-                  value={Math.round((settings.auto_polish_interval || 21600) / 3600)}
+                  value={Math.round((Number(settings.auto_polish_interval) || 21600) / 3600)}
                   onChange={(event) => {
                     const hours = parseInt(event.target.value, 10) || 6;
                     setSettings({ ...settings, auto_polish_interval: hours * 3600 });
