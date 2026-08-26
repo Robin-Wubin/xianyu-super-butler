@@ -209,6 +209,13 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_discount_amount INTEGER")
                 self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_bargain_rounds INTEGER")
                 logger.info("item_ai_configs 议价参数列添加完成")
+            # 旧库迁移：商品级自动回复总开关（默认关——只对显式开启的商品回复）
+            try:
+                self._execute_sql(cursor, "SELECT auto_reply_enabled FROM item_ai_configs LIMIT 1")
+            except Exception:
+                logger.info("正在为 item_ai_configs 表添加商品级自动回复开关列...")
+                self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN auto_reply_enabled INTEGER DEFAULT 0")
+                logger.info("item_ai_configs 自动回复开关列添加完成")
 
             # 创建AI对话历史表
             cursor.execute('''
@@ -2505,7 +2512,7 @@ class DBManager:
                 cursor = self.conn.cursor()
                 cursor.execute(
                     '''SELECT ai_enabled, custom_prompts, max_discount_percent,
-                              max_discount_amount, max_bargain_rounds
+                              max_discount_amount, max_bargain_rounds, auto_reply_enabled
                        FROM item_ai_configs WHERE cookie_id = ? AND item_id = ?''',
                     (cookie_id, item_id),
                 )
@@ -2518,6 +2525,7 @@ class DBManager:
                     'max_discount_percent': row[2],  # None=账号默认
                     'max_discount_amount': row[3],
                     'max_bargain_rounds': row[4],
+                    'auto_reply_enabled': row[5] if row[5] is not None else 0,  # 商品级自动回复总开关，默认关
                 }
         except Exception as e:
             logger.error(f"获取商品AI配置失败: {e}")
@@ -2527,27 +2535,33 @@ class DBManager:
                             custom_prompts: str = '',
                             max_discount_percent=None,
                             max_discount_amount=None,
-                            max_bargain_rounds=None) -> bool:
+                            max_bargain_rounds=None,
+                            auto_reply_enabled=None) -> bool:
         """保存商品级 AI 回复配置。ai_enabled 传 None 表示跟随账号；
-        议价参数传 None 表示使用账号默认值。"""
+        议价参数传 None 表示使用账号默认值；
+        auto_reply_enabled：商品级自动回复总开关（1=开/0=关），传 None
+        表示本次调用不改这个字段。"""
         try:
             with self.lock:
                 cursor = self.conn.cursor()
                 cursor.execute('''
                 INSERT INTO item_ai_configs (
                     cookie_id, item_id, ai_enabled, custom_prompts,
-                    max_discount_percent, max_discount_amount, max_bargain_rounds, updated_at
+                    max_discount_percent, max_discount_amount, max_bargain_rounds,
+                    auto_reply_enabled, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(cookie_id, item_id) DO UPDATE SET
                     ai_enabled = excluded.ai_enabled,
                     custom_prompts = excluded.custom_prompts,
                     max_discount_percent = excluded.max_discount_percent,
                     max_discount_amount = excluded.max_discount_amount,
                     max_bargain_rounds = excluded.max_bargain_rounds,
+                    auto_reply_enabled = COALESCE(excluded.auto_reply_enabled, item_ai_configs.auto_reply_enabled),
                     updated_at = CURRENT_TIMESTAMP
                 ''', (cookie_id, item_id, ai_enabled, custom_prompts or '',
-                      max_discount_percent, max_discount_amount, max_bargain_rounds))
+                      max_discount_percent, max_discount_amount, max_bargain_rounds,
+                      auto_reply_enabled))
                 self.conn.commit()
                 return True
         except Exception as e:

@@ -5460,13 +5460,14 @@ def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
                     cursor = db_manager.conn.cursor()
                     cursor.execute(
                         f'''SELECT cookie_id, item_id, ai_enabled,
-                               LENGTH(COALESCE(custom_prompts, '')) AS prompt_len
+                               LENGTH(COALESCE(custom_prompts, '')) AS prompt_len,
+                               COALESCE(auto_reply_enabled, 0)
                         FROM item_ai_configs
                         WHERE cookie_id IN ({ai_placeholders})''',
                         tuple(ai_cookie_ids),
                     )
                     ai_cfg_map = {
-                        (str(r[0]), str(r[1])): {'ai_enabled': r[2], 'has_custom_prompts': bool(r[3])}
+                        (str(r[0]), str(r[1])): {'ai_enabled': r[2], 'has_custom_prompts': bool(r[3]), 'auto_reply_enabled': int(r[4] or 0)}
                         for r in cursor.fetchall()
                     }
             else:
@@ -5582,12 +5583,14 @@ def create_manual_item(
 
 class ItemAIConfigIn(BaseModel):
     """商品级 AI 回复配置。ai_enabled: None=跟随账号, 0=强制关, 1=强制开；
-    议价参数为 None 时使用账号默认值"""
+    议价参数为 None 时使用账号默认值；
+    auto_reply_enabled: 商品级自动回复总开关（None=不改，0=关，1=开）"""
     ai_enabled: Optional[int] = None
     custom_prompts: str = ""
     max_discount_percent: Optional[int] = None
     max_discount_amount: Optional[int] = None
     max_bargain_rounds: Optional[int] = None
+    auto_reply_enabled: Optional[int] = None
 
 
 def _ensure_item_ownership(cookie_id: str, current_user: Dict[str, Any]) -> None:
@@ -5612,6 +5615,7 @@ def get_item_ai_config(cookie_id: str, item_id: str, current_user: Dict[str, Any
             "max_discount_percent": cfg.get("max_discount_percent"),
             "max_discount_amount": cfg.get("max_discount_amount"),
             "max_bargain_rounds": cfg.get("max_bargain_rounds"),
+            "auto_reply_enabled": cfg.get("auto_reply_enabled", 0),
             "account": {
                 "ai_enabled": bool(account.get("ai_enabled")),
                 "max_discount_percent": account.get("max_discount_percent", 10),
@@ -5638,10 +5642,13 @@ def update_item_ai_config(cookie_id: str, item_id: str, config: ItemAIConfigIn,
             _val = getattr(config, _field)
             if _val is not None and _val < 0:
                 raise HTTPException(status_code=400, detail=f"{_field} 不能为负数")
+        if config.auto_reply_enabled not in (None, 0, 1):
+            raise HTTPException(status_code=400, detail="auto_reply_enabled 只能为 null/0/1")
         from app.db_manager import db_manager
         if not db_manager.save_item_ai_config(
             cookie_id, item_id, config.ai_enabled, config.custom_prompts,
             config.max_discount_percent, config.max_discount_amount, config.max_bargain_rounds,
+            auto_reply_enabled=config.auto_reply_enabled,
         ):
             raise HTTPException(status_code=500, detail="保存失败")
         return {"success": True, "message": "商品AI配置已保存"}

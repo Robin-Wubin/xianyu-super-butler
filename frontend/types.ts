@@ -151,7 +151,7 @@ export interface Item {
   /** 闲鱼原始商品状态：1=已售出，0=在售（cardData.itemStatus） */
   item_status?: number;
   /** 商品级 AI 回复配置（ai_enabled: null=跟随账号, 0=强制关, 1=强制开） */
-  ai_config?: { ai_enabled: number | null; has_custom_prompts?: boolean };
+  ai_config?: { ai_enabled: number | null; has_custom_prompts?: boolean; auto_reply_enabled?: number };
   /** 有效成交订单数（排除退款/关闭），来自 orders 表交叉统计 */
   sold_count?: number;
   /** 有效成交总件数（按 buy_num 求和） */

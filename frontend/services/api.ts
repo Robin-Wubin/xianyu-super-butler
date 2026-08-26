@@ -832,6 +832,7 @@ export interface ItemAIConfigData {
     max_discount_percent: number | null;
     max_discount_amount: number | null;
     max_bargain_rounds: number | null;
+    auto_reply_enabled: number;
     account: {
         ai_enabled: boolean;
         max_discount_percent: number;
@@ -853,6 +854,7 @@ export const updateItemAIConfig = async (
         max_discount_percent?: number | null;
         max_discount_amount?: number | null;
         max_bargain_rounds?: number | null;
+        auto_reply_enabled?: number;
     },
 ): Promise<ApiResponse> => {
     return put(`/items/ai-config/${cookieId}/${itemId}`, config);

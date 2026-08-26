@@ -189,10 +189,12 @@ const ItemList: React.FC = () => {
     max_discount_percent: number | null;
     max_discount_amount: number | null;
     max_bargain_rounds: number | null;
+    auto_reply_enabled: number;
     account: { ai_enabled: boolean; max_discount_percent: number; max_discount_amount: number; max_bargain_rounds: number };
   }>({
     ai_enabled: null, custom_prompts: '',
     max_discount_percent: null, max_discount_amount: null, max_bargain_rounds: null,
+    auto_reply_enabled: 0,
     account: { ai_enabled: false, max_discount_percent: 10, max_discount_amount: 100, max_bargain_rounds: 3 },
   });
   const [aiLoading, setAiLoading] = useState(false);
@@ -209,6 +211,7 @@ const ItemList: React.FC = () => {
         max_discount_percent: cfg.max_discount_percent ?? null,
         max_discount_amount: cfg.max_discount_amount ?? null,
         max_bargain_rounds: cfg.max_bargain_rounds ?? null,
+        auto_reply_enabled: cfg.auto_reply_enabled ?? 0,
         account: cfg.account,
       });
     } catch (error) {
@@ -229,6 +232,7 @@ const ItemList: React.FC = () => {
         max_discount_percent: aiCfg.max_discount_percent,
         max_discount_amount: aiCfg.max_discount_amount,
         max_bargain_rounds: aiCfg.max_bargain_rounds,
+        auto_reply_enabled: aiCfg.auto_reply_enabled,
       });
       setNotice({ type: 'success', message: 'AI 回复配置已保存' });
       setAiModalItem(null);
@@ -1013,7 +1017,25 @@ const ItemList: React.FC = () => {
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
-                          <span className="text-xs font-semibold text-gray-600">AI 回复</span>
+                          <span className="text-xs font-semibold text-gray-600" title="商品级自动回复总开关，默认关闭">自动回复</span>
+                          <button
+                            type="button"
+                            onClick={() => openAiConfig(item)}
+                            className="rounded px-1.5 py-0.5 text-xs font-bold hover:bg-gray-100"
+                            title="配置该商品的自动回复总开关与 AI 策略"
+                          >
+                            {(() => {
+                              const cfg = item.ai_config;
+                              const on = cfg?.auto_reply_enabled === 1;
+                              const aiPart = cfg?.ai_enabled === 1 ? 'AI开' : (cfg?.ai_enabled === 0 ? 'AI关' : '');
+                              return on
+                                ? <span className="text-green-600">已开启{aiPart ? ` ·${aiPart}` : ''} ›</span>
+                                : <span className="text-gray-400">未开启{aiPart ? ` ·${aiPart}` : ''} ›</span>;
+                            })()}
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-xs font-semibold text-gray-600" title="AI 生成回复的策略与提示词">AI 策略</span>
                           <button
                             type="button"
                             onClick={() => openAiConfig(item)}
@@ -1537,15 +1559,42 @@ const ItemList: React.FC = () => {
       {aiModalItem && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg bg-white p-5 shadow-xl">
-            <h3 className="text-base font-bold text-gray-900">AI 回复 · {aiModalItem.item_title || aiModalItem.item_id}</h3>
+            <h3 className="text-base font-bold text-gray-900">自动回复与 AI · {aiModalItem.item_title || aiModalItem.item_id}</h3>
             {aiLoading ? (
               <div className="flex items-center justify-center gap-2 py-10 text-sm text-gray-500">
                 <Loader2 className="h-4 w-4 animate-spin" /> 加载配置中…
               </div>
             ) : (
               <>
+                <div className="mt-4 rounded-md border-2 p-3" style={{ borderColor: aiCfg.auto_reply_enabled === 1 ? '#10b981' : '#e5e7eb', background: aiCfg.auto_reply_enabled === 1 ? '#f0fdf4' : '#f9fafb' }}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-gray-900">自动回复总开关</p>
+                      <p className="mt-0.5 text-xs leading-5 text-gray-500">
+                        仅此商品生效，默认关闭。关闭时该商品的买家消息不做任何自动回复（关键词/AI/默认回复全部跳过）；开启后按下方策略回复。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={aiCfg.auto_reply_enabled === 1}
+                      onClick={() => setAiCfg(current => ({
+                        ...current,
+                        auto_reply_enabled: current.auto_reply_enabled === 1 ? 0 : 1,
+                      }))}
+                      className="relative h-6 w-11 shrink-0 rounded-full transition-colors"
+                      style={{ background: aiCfg.auto_reply_enabled === 1 ? '#10b981' : '#d1d5db' }}
+                    >
+                      <span
+                        className="absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all"
+                        style={{ left: aiCfg.auto_reply_enabled === 1 ? '22px' : '2px' }}
+                      />
+                    </button>
+                  </div>
+                </div>
+                <div className={aiCfg.auto_reply_enabled === 1 ? '' : 'pointer-events-none opacity-40'}>
                 <div className="mt-4">
-                  <label className="mb-1.5 block text-sm font-bold text-gray-700" htmlFor="item-ai-mode">回复开关</label>
+                  <label className="mb-1.5 block text-sm font-bold text-gray-700" htmlFor="item-ai-mode">AI 回复策略</label>
                   <select
                     id="item-ai-mode"
                     className="ios-input w-full rounded-md px-3 py-2.5"
@@ -1606,6 +1655,7 @@ const ItemList: React.FC = () => {
                   <p className="mt-1.5 text-xs text-gray-500">
                     留空 = 使用账号默认值（当前默认：比例 {aiCfg.account.max_discount_percent}%、金额 {aiCfg.account.max_discount_amount} 元、轮次 {aiCfg.account.max_bargain_rounds}）。
                   </p>
+                </div>
                 </div>
                 <div className="mt-5 flex justify-end gap-2">
                   <button type="button" onClick={() => setAiModalItem(null)} className="ios-btn-secondary rounded-md px-4 py-2.5" disabled={aiSaving}>

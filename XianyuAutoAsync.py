@@ -9570,6 +9570,31 @@ class XianyuLive:
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】自动回复已禁用")
                 return
 
+            # 商品级自动回复门禁：只对显式开启的商品自动回复（默认关）。
+            # 覆盖所有回复策略（API/关键词/AI/默认）。无商品上下文的消息
+            # （item_id 为空）不属于任何商品，同样不自动回复。
+            try:
+                from app.db_manager import db_manager as _db_gate
+                _gate_cfg = _db_gate.get_item_ai_config(self.cookie_id, item_id or '')
+                _item_auto_reply_on = _gate_cfg.get('auto_reply_enabled') == 1
+            except Exception as _gate_err:
+                logger.error(f"【{self.cookie_id}】读取商品自动回复开关失败，按默认（关）处理: {self._safe_str(_gate_err)}")
+                _item_auto_reply_on = False
+            if not _item_auto_reply_on:
+                self._add_reply_decision_log(
+                    message_data,
+                    **log_context,
+                    process_status="skipped",
+                    decision_reason="item_auto_reply_disabled",
+                    reply_strategy="none",
+                    send_status="unknown",
+                )
+                logger.info(
+                    f"[{msg_time}] 【{self.cookie_id}】【系统】商品 {item_id or '(无商品上下文)'} "
+                    f"未开启自动回复，跳过（默认关闭，需在商品列表单独开启）"
+                )
+                return
+
             # 检查该chat_id是否处于暂停状态
             if pause_manager.is_chat_paused(chat_id, self.cookie_id):
                 remaining_time = pause_manager.get_remaining_pause_time(chat_id, self.cookie_id)
