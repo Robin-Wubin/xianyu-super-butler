@@ -1813,8 +1813,15 @@ class DBManager:
                         admin_user = cursor.fetchone()
                         user_id = admin_user[0] if admin_user else 1
 
+                # 注意：不能用 INSERT OR REPLACE —— 它是「整行替换」，
+                # 没写的列（nickname、auto_rate_enabled、auto_flower_enabled、
+                # auto_thanks_enabled 等）会被全部重置为默认值，Cookie 刷新
+                # 时会把买家互动开关等配置悄悄清掉（表现为重启后开关置灰）。
+                # UPSERT 只更新 value / user_id，其余列保持原值。
                 self._execute_sql(cursor,
-                    "INSERT OR REPLACE INTO cookies (id, value, user_id) VALUES (?, ?, ?)",
+                    "INSERT INTO cookies (id, value, user_id) VALUES (?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET value = excluded.value, "
+                    "user_id = excluded.user_id",
                     (cookie_id, cookie_value, user_id)
                 )
 
