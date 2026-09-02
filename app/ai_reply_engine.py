@@ -478,6 +478,90 @@ class AIReplyEngine:
 
     # AI 预生成问答：单次生成的目标条数（太多会稀释质量/超长）
     QA_GEN_COUNT = 8
+    # 生成问答与已有问答的语义去重阈值。取值高于 RAG 检索阈值：
+    # 检索是「相关即可」，去重要判定「换个说法问同一件事」，
+    # 需要更严格；0.75 下「150还能再少点不」vs「150能便宜点不」会命中，
+    # 而不同话题的问答相似度通常在 0.6 以下。
+    QA_DEDUP_THRESHOLD = 0.75
+
+    @staticmethod
+    def _norm_question(text: str) -> str:
+        """问题字面归一化：去空白/标点、转小写，用于精确去重兜底。"""
+        return re.sub(r'[\s，。？！、,.?!;；:：“”‘\'"（）()]+', '', (text or '')).lower()
+
+    def _dedup_generated_pairs(self, cookie_id: str, item_id: str, pairs: list) -> tuple:
+        """剔除与已有问答重复/雷同的新问答，返回 (保留列表, 排除明细)。
+
+        明细为 [(question, reason)]，reason 形如 "已有问答「…」(0.86)"
+        或 "与本批第N条重复"，供上层日志/提示。
+        """
+        removed: list = []
+        if not pairs:
+            return pairs, removed
+        existing = db_manager.get_qa_pairs(cookie_id, item_id or None, include_disabled=False)
+
+        from app import qa_embedder
+        model_ok = qa_embedder.available()
+        existing_vecs = []
+        if model_ok:
+            try:
+                import numpy as np
+                for p in existing:
+                    v = qa_embedder.embed_one(p['question'].splitlines()[0])
+                    if v is not None:
+                        existing_vecs.append((p, np.asarray(v, dtype=np.float32)))
+            except Exception as exc:
+                logger.warning(f"已有问答向量构建失败，退回字面去重: {exc}")
+                model_ok = False
+                existing_vecs = []
+
+        kept = []
+        batch_vecs = []   # 新批内互斥去重
+        batch_norms = set()
+        if not model_ok:
+            existing_norms = {self._norm_question(p['question']) for p in existing}
+        for p in pairs:
+            q = (p.get('question') or '').splitlines()[0].strip()
+            if not q:
+                continue
+            qn = self._norm_question(q)
+            dup_reason = None
+            if model_ok:
+                import numpy as np
+                v = qa_embedder.embed_one(q)
+                if v is not None:
+                    arr = np.asarray(v, dtype=np.float32)
+                    for ep, ev in existing_vecs:
+                        score = float(arr @ ev)
+                        if score >= self.QA_DEDUP_THRESHOLD:
+                            dup_reason = f"已有问答「{(ep['question'] or '')[:20]}」({score:.2f})"
+                            break
+                    if not dup_reason:
+                        for idx, bv in enumerate(batch_vecs):
+                            score = float(arr @ bv)
+                            if score >= self.QA_DEDUP_THRESHOLD:
+                                dup_reason = f"与本批第{idx + 1}条重复({score:.2f})"
+                                break
+                    if not dup_reason:
+                        batch_vecs.append(arr)
+                else:
+                    # 这条嵌入失败：只能字面比对
+                    for ep in existing:
+                        if self._norm_question(ep['question']) == qn:
+                            dup_reason = f"已有问答「{(ep['question'] or '')[:20]}」(字面)"
+                            break
+            else:
+                if qn in existing_norms:
+                    dup_reason = "已有问答(字面相同)"
+            if dup_reason is None and not model_ok and qn in batch_norms:
+                dup_reason = "与本批重复(字面相同)"
+            if dup_reason:
+                removed.append((q, dup_reason))
+                continue
+            kept.append(p)
+            if not model_ok:
+                batch_norms.add(qn)
+        return kept, removed
 
     def generate_qa_pairs(self, cookie_id: str, item_id: str, count: int = 8) -> list:
         """基于商品详情，用大模型预生成买家视角的常见问答对。
@@ -546,6 +630,9 @@ class AIReplyEngine:
                 pairs.append({"question": q[:500], "answer": a[:2000]})
         if not pairs:
             raise ValueError("AI 未生成有效问答对")
+        pairs, removed = self._dedup_generated_pairs(cookie_id, item_id, pairs)
+        for q, reason in removed:
+            logger.info(f"[QA-GEN] 排除重复问题「{q[:30]}」: {reason}")
         return pairs
 
     def generate_qa_pairs_stream(self, cookie_id: str, item_id: str, count: int = 8):
@@ -618,6 +705,16 @@ class AIReplyEngine:
                     pairs.append({"question": q[:500], "answer": a[:2000]})
             return pairs or None
 
+        def _dedup_and_done(pairs):
+            """语义去重后发 done 事件；有排除时先通知前端。"""
+            kept, removed = self._dedup_generated_pairs(cookie_id, item_id, pairs)
+            for q, reason in removed:
+                logger.info(f"[QA-GEN] 排除重复问题「{q[:30]}」: {reason}")
+            if removed:
+                yield {"type": "notice",
+                       "message": f"已排除 {len(removed)} 条与已有问答重复/雷同的问题"}
+            yield {"type": "done", "pairs": kept}
+
         if self._is_dashscope_api(settings) or self._is_gemini_api(settings):
             yield {"type": "notice",
                    "message": "当前 AI 配置不支持流式输出，生成较慢（约1~2分钟），请耐心等待"}
@@ -627,7 +724,7 @@ class AIReplyEngine:
             pairs = _parse_pairs(raw)
             if pairs is None:
                 raise ValueError("AI 返回 JSON 解析失败")
-            yield {"type": "done", "pairs": pairs}
+            yield from _dedup_and_done(pairs)
             return
 
         # OpenAI 兼容：流式调用。读超时放宽到 10 分钟（思考模型首 token 可能很慢），
@@ -668,7 +765,7 @@ class AIReplyEngine:
             raw = "".join(collected).strip()
             pairs = _parse_pairs(raw)
             if pairs is not None:
-                yield {"type": "done", "pairs": pairs}
+                yield from _dedup_and_done(pairs)
                 return
             if attempt == 1:
                 budget = min(budget * 3, self.MAX_TOKENS_CEILING)
