@@ -5690,8 +5690,9 @@ def create_qa_pair(cookie_id: str, payload: QAPairIn,
         _ensure_item_ownership(cookie_id, current_user)
         if not str(payload.question).strip() or not str(payload.answer).strip():
             raise HTTPException(status_code=400, detail="问题和回答都不能为空")
-        if len(payload.question) > 2000 or len(payload.answer) > 4000:
-            raise HTTPException(status_code=400, detail="问题最长2000字，回答最长4000字")
+        # 多条消息按行拼接后可能较长，问 8000/答 8000 字符上限
+        if len(payload.question) > 8000 or len(payload.answer) > 8000:
+            raise HTTPException(status_code=400, detail="问题或回答过长（最多8000字符），请减少节选条数")
         from app.db_manager import db_manager
         qa_id = db_manager.add_qa_pair(
             cookie_id, payload.question, payload.answer,

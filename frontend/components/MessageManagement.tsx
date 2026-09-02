@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   BookMarked,
+  Check,
   Image,
   Inbox,
   Loader2,
@@ -201,32 +202,50 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
   const [savingFilters, setSavingFilters] = useState(false);
 
   // ===== AI 问答库节选收录 =====
-  // selectMode: 开启后消息气泡可点选，先选一条买家消息做「问」，再选一条
-  // 自己的回复做「答」，弹窗确认后存入问答库（跟随当前会话的商品归属）。
+  // selectMode: 开启后消息气泡可点选。一个问答可包含多条提问和多条回复：
+  // 买家消息可多选作「问」，自己的回复可多选作「答」，再点确认收录。
+  // 保存时各按时间顺序拼接为多行文本存入问答库（DB 结构不变）。
   const [selectMode, setSelectMode] = useState(false);
-  const [selectedQuestion, setSelectedQuestion] = useState<ChatMessage | null>(null);
-  const [selectedAnswer, setSelectedAnswer] = useState<ChatMessage | null>(null);
+  const [selectedQuestions, setSelectedQuestions] = useState<ChatMessage[]>([]);
+  const [selectedAnswers, setSelectedAnswers] = useState<ChatMessage[]>([]);
   const [qaDialogOpen, setQaDialogOpen] = useState(false);
   const [qaSaving, setQaSaving] = useState(false);
   const [qaScopeItemId, setQaScopeItemId] = useState<string | null>(null); // ''=通用 null=用会话商品
+  const messageKey = (message: ChatMessage) =>
+    message.messageId || `${message.time}-${(message.text || '').slice(0, 24)}`;
+  const canSubmitQA = selectedQuestions.length > 0 && selectedAnswers.length > 0;
   const toggleSelectMode = () => {
     setSelectMode((current) => !current);
-    setSelectedQuestion(null);
-    setSelectedAnswer(null);
+    setSelectedQuestions([]);
+    setSelectedAnswers([]);
   };
   const pickMessage = (message: ChatMessage) => {
     if (!selectMode) return;
     if (!message.text || message.type === 'system') return;
+    const key = messageKey(message);
     if (!message.isSelf) {
-      setSelectedQuestion(message);
-      if (!selectedAnswer) return;
+      setSelectedQuestions((current) =>
+        current.some((m) => messageKey(m) === key)
+          ? current.filter((m) => messageKey(m) !== key)
+          : [...current, message]);
     } else {
-      setSelectedAnswer(message);
-      if (!selectedQuestion) return;
+      setSelectedAnswers((current) =>
+        current.some((m) => messageKey(m) === key)
+          ? current.filter((m) => messageKey(m) !== key)
+          : [...current, message]);
     }
-    if ((!message.isSelf && selectedAnswer) || (message.isSelf && selectedQuestion)) {
-      setQaScopeItemId(activeConversation?.itemId || '');
-      setQaDialogOpen(true);
+  };
+  const openQADialog = () => {
+    if (!canSubmitQA) return;
+    setQaScopeItemId(activeConversation?.itemId ?? '');
+    setQaDialogOpen(true);
+  };
+  const removeSelectedMessage = (message: ChatMessage, isQuestion: boolean) => {
+    const key = messageKey(message);
+    if (isQuestion) {
+      setSelectedQuestions((current) => current.filter((m) => messageKey(m) !== key));
+    } else {
+      setSelectedAnswers((current) => current.filter((m) => messageKey(m) !== key));
     }
   };
 
@@ -712,13 +731,28 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {selectMode && (
-                  <span className="hidden text-xs text-blue-600 sm:inline">
-                    {selectedQuestion && selectedAnswer
-                      ? '已选好问答'
-                      : selectedQuestion
-                        ? '再点一条自己的回复作答'
-                        : '点一条买家消息作问'}
+                  <span className="hidden items-center gap-1.5 text-xs text-blue-600 sm:inline-flex">
+                    <span>问 <b className="text-sm">{selectedQuestions.length}</b> 条</span>
+                    <span className="text-[var(--text-soft)]">/</span>
+                    <span>答 <b className="text-sm">{selectedAnswers.length}</b> 条</span>
+                    {!canSubmitQA && <span className="text-[var(--text-soft)]">（两侧都至少选一条）</span>}
                   </span>
+                )}
+                {selectMode && (
+                  <button
+                    type="button"
+                    disabled={!canSubmitQA}
+                    onClick={openQADialog}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold ${
+                      canSubmitQA
+                        ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                        : 'cursor-not-allowed bg-[var(--surface-strong)] text-[var(--text-soft)]'
+                    }`}
+                    title={canSubmitQA ? '确认收录所选问答' : '先在两侧各选至少一条消息'}
+                  >
+                    <Check className="h-4 w-4" />
+                    收录
+                  </button>
                 )}
                 <button
                   type="button"
@@ -788,8 +822,9 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
                     const senderLabel = message.isSelf
                       ? accountName(activeAccount)
                       : activeConversation.otherUserName || activeConversation.otherUserId;
-                    const isPickedQuestion = selectedQuestion?.messageId === message.messageId;
-                    const isPickedAnswer = selectedAnswer?.messageId === message.messageId;
+                    const messageKeyRef = messageKey(message);
+                    const isPickedQuestion = selectMode && selectedQuestions.some((m) => messageKey(m) === messageKeyRef);
+                    const isPickedAnswer = selectMode && selectedAnswers.some((m) => messageKey(m) === messageKeyRef);
                     const selectable = selectMode && message.text && message.type !== 'system';
                     return (
                       <div key={message.messageId || `${message.time}-${index}`}>
@@ -1117,19 +1152,22 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
   );
 
   const saveQAPair = async () => {
-    if (!selectedQuestion?.text || !selectedAnswer?.text) return;
+    if (selectedQuestions.length === 0 || selectedAnswers.length === 0) return;
     setQaSaving(true);
     try {
+      // 多条消息按时间顺序拼接为多行文本（一行一条），与对话里的节奏一致
+      const sortedQuestions = [...selectedQuestions].sort((a, b) => a.time - b.time);
+      const sortedAnswers = [...selectedAnswers].sort((a, b) => a.time - b.time);
       await createQAPair(activeAccountId, {
-        question: selectedQuestion.text,
-        answer: selectedAnswer.text,
+        question: sortedQuestions.map((m) => m.text).join('\n'),
+        answer: sortedAnswers.map((m) => m.text).join('\n'),
         item_id: qaScopeItemId ?? activeConversation?.itemId ?? '',
         source: 'chat',
       });
-      notify('问答已收录进 AI 问答库', 'success');
+      notify(`问答已收录（问 ${sortedQuestions.length} 条 + 答 ${sortedAnswers.length} 条）`, 'success');
       setQaDialogOpen(false);
-      setSelectedQuestion(null);
-      setSelectedAnswer(null);
+      setSelectedQuestions([]);
+      setSelectedAnswers([]);
       setSelectMode(false);
     } catch (error) {
       notify(`收录失败：${(error as Error).message}`, 'error');
@@ -1139,7 +1177,9 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
   };
 
   const renderQADialog = () => {
-    if (!qaDialogOpen || !selectedQuestion?.text || !selectedAnswer?.text) return null;
+    if (!qaDialogOpen) return null;
+    const sortedQuestions = [...selectedQuestions].sort((a, b) => a.time - b.time);
+    const sortedAnswers = [...selectedAnswers].sort((a, b) => a.time - b.time);
     const scopeOptions: Array<{ value: string; label: string }> = [];
     if (activeConversation?.itemId) {
       scopeOptions.push({
@@ -1151,7 +1191,7 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
     const currentScope = qaScopeItemId ?? activeConversation?.itemId ?? '';
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-        <div className="w-full max-w-lg rounded-lg bg-[var(--surface)] p-5 shadow-xl">
+        <div className="flex max-h-[88vh] w-full max-w-lg flex-col rounded-lg bg-[var(--surface)] p-5 shadow-xl">
           <div className="mb-3 flex items-center justify-between">
             <h4 className="text-base font-bold text-[var(--text)]">收录为 AI 问答</h4>
             <button
@@ -1163,18 +1203,58 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
               <X className="h-4 w-4 text-[var(--text-muted)]" />
             </button>
           </div>
-          <div className="space-y-3 text-sm">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto text-sm">
             <div className="rounded-md bg-[var(--surface-strong)] p-3">
-              <p className="mb-1 text-xs font-bold text-blue-600">问（买家消息）</p>
-              <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[var(--text)]">
-                {selectedQuestion.text}
+              <p className="mb-1.5 text-xs font-bold text-blue-600">
+                问（买家消息，{sortedQuestions.length} 条，按时间排序）
               </p>
+              <div className="space-y-1.5">
+                {sortedQuestions.map((message, index) => (
+                  <div key={messageKey(message)} className="flex items-start gap-2">
+                    <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[var(--text)]">
+                      <span className="mr-1 text-[11px] text-[var(--text-soft)]">{index + 1}.</span>
+                      {message.text}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => removeSelectedMessage(message, true)}
+                      className="mt-0.5 shrink-0 rounded p-0.5 text-[var(--text-soft)] hover:bg-[var(--surface-hover)] hover:text-red-500"
+                      title="移除这条"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+                {sortedQuestions.length === 0 && (
+                  <p className="text-xs text-red-500">问已清空，请至少保留一条</p>
+                )}
+              </div>
             </div>
             <div className="rounded-md bg-[var(--surface-strong)] p-3">
-              <p className="mb-1 text-xs font-bold text-emerald-600">答（你的回复）</p>
-              <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[var(--text)]">
-                {selectedAnswer.text}
+              <p className="mb-1.5 text-xs font-bold text-emerald-600">
+                答（你的回复，{sortedAnswers.length} 条，按时间排序）
               </p>
+              <div className="space-y-1.5">
+                {sortedAnswers.map((message, index) => (
+                  <div key={messageKey(message)} className="flex items-start gap-2">
+                    <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[var(--text)]">
+                      <span className="mr-1 text-[11px] text-[var(--text-soft)]">{index + 1}.</span>
+                      {message.text}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => removeSelectedMessage(message, false)}
+                      className="mt-0.5 shrink-0 rounded p-0.5 text-[var(--text-soft)] hover:bg-[var(--surface-hover)] hover:text-red-500"
+                      title="移除这条"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+                {sortedAnswers.length === 0 && (
+                  <p className="text-xs text-red-500">答已清空，请至少保留一条</p>
+                )}
+              </div>
             </div>
             <div>
               <p className="mb-1.5 text-xs font-bold text-[var(--text-muted)]">生效范围</p>
@@ -1188,11 +1268,11 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
                 ))}
               </select>
               <p className="mt-1 text-[11px] text-[var(--text-soft)]">
-                收录后 AI 回复时会参考这条问答的口径，可在「AI 回复 → 问答库」中管理。
+                多条消息将按时间顺序合并为一条问答（每条一行）。收录后 AI 回复时会参考这条问答的口径，可在「AI 回复 → 问答库」中管理。
               </p>
             </div>
           </div>
-          <div className="mt-4 flex justify-end gap-2">
+          <div className="mt-4 flex shrink-0 justify-end gap-2">
             <button
               type="button"
               onClick={() => setQaDialogOpen(false)}
@@ -1202,7 +1282,7 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
             </button>
             <button
               type="button"
-              disabled={qaSaving}
+              disabled={qaSaving || sortedQuestions.length === 0 || sortedAnswers.length === 0}
               onClick={() => void saveQAPair()}
               className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50"
             >
