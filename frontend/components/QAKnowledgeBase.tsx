@@ -134,6 +134,12 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
     }
   };
 
+  // 当前账号下的在售商品列表（AI 生成问答选品用）
+  const accountItems = useMemo(
+    () => items.filter((item) => item.cookie_id === selectedAccount),
+    [items, selectedAccount],
+  );
+
   const handleGenerate = async () => {
     if (!selectedAccount || !genItemId) return;
     setGenerating(true);
