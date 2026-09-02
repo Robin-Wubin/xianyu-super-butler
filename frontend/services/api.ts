@@ -1,4 +1,4 @@
-import { get, post, put, del } from '../lib/request';
+import { get, post, put, del, request } from '../lib/request';
 import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
@@ -843,6 +843,48 @@ export interface ItemAIConfigData {
 
 export const getItemAIConfig = async (cookieId: string, itemId: string): Promise<ItemAIConfigData> => {
     return get(`/items/ai-config/${cookieId}/${itemId}`);
+}
+
+// ============ AI 问答库 ============
+
+export interface QAPair {
+    id: number;
+    item_id: string;
+    question: string;
+    answer: string;
+    source: 'manual' | 'chat' | string;
+    enabled: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export const getQAPairs = async (cookieId: string, itemId?: string): Promise<QAPair[]> => {
+    const suffix = itemId ? `?item_id=${encodeURIComponent(itemId)}` : '';
+    const result = await get<{ success: boolean; data: { qa_pairs: QAPair[] } }>(`/ai-qa/${cookieId}${suffix}`);
+    return result?.data?.qa_pairs || [];
+}
+
+export const createQAPair = async (
+    cookieId: string,
+    data: { question: string; answer: string; item_id?: string; source?: string },
+): Promise<ApiResponse> => {
+    return post(`/ai-qa/${cookieId}`, data);
+}
+
+export const updateQAPair = async (
+    cookieId: string,
+    qaId: number,
+    data: { question: string; answer: string; item_id?: string; source?: string },
+): Promise<ApiResponse> => {
+    return put(`/ai-qa/${cookieId}/${qaId}`, data);
+}
+
+export const deleteQAPair = async (cookieId: string, qaId: number): Promise<ApiResponse> => {
+    return del(`/ai-qa/${cookieId}/${qaId}`);
+}
+
+export const toggleQAPair = async (cookieId: string, qaId: number): Promise<ApiResponse> => {
+    return request(`/ai-qa/${cookieId}/${qaId}/toggle`, { method: 'PATCH' });
 }
 
 export const updateItemAIConfig = async (

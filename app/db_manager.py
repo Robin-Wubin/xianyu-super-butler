@@ -209,6 +209,29 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_discount_amount INTEGER")
                 self._execute_sql(cursor, "ALTER TABLE item_ai_configs ADD COLUMN max_bargain_rounds INTEGER")
                 logger.info("item_ai_configs 议价参数列添加完成")
+
+            # AI 问答库：卖家从真实对话节选的问答对，供 AI 参考回答。
+            # scope 与 item_ai_configs 一致：item_id 为空 = 账号通用问答库，
+            # 非空 = 该商品专属问答库（商品级优先注入）。
+            self._execute_sql(cursor, '''
+            CREATE TABLE IF NOT EXISTS ai_qa_pairs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cookie_id TEXT NOT NULL,
+                item_id TEXT DEFAULT '',
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                source TEXT DEFAULT 'manual',
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, '''
+            CREATE INDEX IF NOT EXISTS idx_ai_qa_pairs_scope
+            ON ai_qa_pairs(cookie_id, item_id, enabled)
+            ''')
+
             # 旧库迁移：商品级自动回复总开关（默认关——只对显式开启的商品回复）
             try:
                 self._execute_sql(cursor, "SELECT auto_reply_enabled FROM item_ai_configs LIMIT 1")
@@ -2606,6 +2629,94 @@ class DBManager:
                 return True
         except Exception as e:
             logger.error(f"保存商品AI配置失败: {e}")
+            return False
+
+    def get_qa_pairs(self, cookie_id: str, item_id: Optional[str] = None,
+                     include_disabled: bool = False) -> List[dict]:
+        """获取问答库。item_id 为 None 时返回该账号全部（含全局与商品级）；
+        传具体 item_id 时返回该商品专属 + 全局兜底。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cond = "AND enabled = 1" if not include_disabled else ""
+                if item_id is None:
+                    self._execute_sql(cursor, f'''
+                        SELECT id, item_id, question, answer, source, enabled, created_at, updated_at
+                        FROM ai_qa_pairs WHERE cookie_id = ? {cond}
+                        ORDER BY (item_id = '') DESC, updated_at DESC
+                    ''', (cookie_id,))
+                    rows = cursor.fetchall()
+                else:
+                    self._execute_sql(cursor, f'''
+                        SELECT id, item_id, question, answer, source, enabled, created_at, updated_at
+                        FROM ai_qa_pairs
+                        WHERE cookie_id = ? AND item_id IN ('', ?) {cond}
+                        ORDER BY (item_id != '') DESC, updated_at DESC
+                    ''', (cookie_id, item_id))
+                    rows = cursor.fetchall()
+            keys = ('id', 'item_id', 'question', 'answer', 'source', 'enabled', 'created_at', 'updated_at')
+            return [dict(zip(keys, r)) for r in rows]
+        except Exception as e:
+            logger.error(f"获取问答库失败: {e}")
+            return []
+
+    def add_qa_pair(self, cookie_id: str, question: str, answer: str,
+                    item_id: str = '', source: str = 'manual') -> Optional[int]:
+        """新增问答对。item_id 为空 = 账号通用库。"""
+        if not question or not str(question).strip() or not answer or not str(answer).strip():
+            return None
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT INTO ai_qa_pairs (cookie_id, item_id, question, answer, source)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (cookie_id, item_id or '', str(question).strip(), str(answer).strip(), source))
+                self.conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"新增问答对失败: {e}")
+            return None
+
+    def update_qa_pair(self, qa_id: int, cookie_id: str,
+                       question: str = None, answer: str = None,
+                       item_id: Optional[str] = None, enabled: Optional[int] = None) -> bool:
+        """更新问答对，只能改自己账号下的。"""
+        fields, values = [], []
+        if question is not None and str(question).strip():
+            fields.append("question = ?"); values.append(str(question).strip())
+        if answer is not None and str(answer).strip():
+            fields.append("answer = ?"); values.append(str(answer).strip())
+        if item_id is not None:
+            fields.append("item_id = ?"); values.append(item_id or '')
+        if enabled is not None:
+            fields.append("enabled = ?"); values.append(1 if enabled else 0)
+        if not fields:
+            return False
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    f"UPDATE ai_qa_pairs SET {', '.join(fields)} WHERE id = ? AND cookie_id = ?",
+                    (*values, qa_id, cookie_id))
+                self.conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"更新问答对失败: {e}")
+            return False
+
+    def delete_qa_pair(self, qa_id: int, cookie_id: str) -> bool:
+        """删除问答对，只能删自己账号下的。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM ai_qa_pairs WHERE id = ? AND cookie_id = ?",
+                               (qa_id, cookie_id))
+                self.conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"删除问答对失败: {e}")
             return False
 
     def get_ai_reply_settings(self, cookie_id: str) -> dict:

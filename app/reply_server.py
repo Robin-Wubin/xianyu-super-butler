@@ -5658,6 +5658,110 @@ def update_item_ai_config(cookie_id: str, item_id: str, config: ItemAIConfigIn,
         raise HTTPException(status_code=500, detail=f"保存商品AI配置失败: {str(e)}")
 
 
+# ============ AI 问答库（从真实对话节选的 Q/A，注入 AI 提示词） ============
+
+class QAPairIn(BaseModel):
+    question: str
+    answer: str
+    item_id: Optional[str] = ""          # 空=账号通用问答库
+    source: str = "manual"              # manual=手写 / chat=对话节选
+
+
+@app.get("/ai-qa/{cookie_id}")
+def list_qa_pairs(cookie_id: str, item_id: Optional[str] = Query(None, description="为空返回账号全部；指定时返回该商品专属+全局"),
+                  current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取问答库列表"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.db_manager import db_manager
+        pairs = db_manager.get_qa_pairs(cookie_id, item_id, include_disabled=True)
+        return {"success": True, "data": {"qa_pairs": pairs}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取问答库失败: {str(e)}")
+
+
+@app.post("/ai-qa/{cookie_id}")
+def create_qa_pair(cookie_id: str, payload: QAPairIn,
+                   current_user: Dict[str, Any] = Depends(get_current_user)):
+    """新增问答对（手写或从对话节选）"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        if not str(payload.question).strip() or not str(payload.answer).strip():
+            raise HTTPException(status_code=400, detail="问题和回答都不能为空")
+        if len(payload.question) > 2000 or len(payload.answer) > 4000:
+            raise HTTPException(status_code=400, detail="问题最长2000字，回答最长4000字")
+        from app.db_manager import db_manager
+        qa_id = db_manager.add_qa_pair(
+            cookie_id, payload.question, payload.answer,
+            item_id=payload.item_id or '', source=payload.source or 'manual')
+        if not qa_id:
+            raise HTTPException(status_code=500, detail="保存失败")
+        return {"success": True, "message": "问答已收录", "data": {"id": qa_id}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"收录问答失败: {str(e)}")
+
+
+@app.put("/ai-qa/{cookie_id}/{qa_id}")
+def modify_qa_pair(cookie_id: str, qa_id: int, payload: QAPairIn,
+                   current_user: Dict[str, Any] = Depends(get_current_user)):
+    """编辑问答对"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.db_manager import db_manager
+        ok = db_manager.update_qa_pair(
+            qa_id, cookie_id,
+            question=payload.question, answer=payload.answer,
+            item_id=payload.item_id or '')
+        if not ok:
+            raise HTTPException(status_code=404, detail="问答不存在或未变更")
+        return {"success": True, "message": "问答已更新"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新问答失败: {str(e)}")
+
+
+@app.delete("/ai-qa/{cookie_id}/{qa_id}")
+def remove_qa_pair(cookie_id: str, qa_id: int,
+                   current_user: Dict[str, Any] = Depends(get_current_user)):
+    """删除问答对"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.db_manager import db_manager
+        if not db_manager.delete_qa_pair(qa_id, cookie_id):
+            raise HTTPException(status_code=404, detail="问答不存在")
+        return {"success": True, "message": "问答已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除问答失败: {str(e)}")
+
+
+@app.patch("/ai-qa/{cookie_id}/{qa_id}/toggle")
+def toggle_qa_pair(cookie_id: str, qa_id: int,
+                   current_user: Dict[str, Any] = Depends(get_current_user)):
+    """启用/停用问答对"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.db_manager import db_manager
+        pairs = db_manager.get_qa_pairs(cookie_id, None, include_disabled=True)
+        current = next((p for p in pairs if p["id"] == qa_id), None)
+        if not current:
+            raise HTTPException(status_code=404, detail="问答不存在")
+        ok = db_manager.update_qa_pair(qa_id, cookie_id, enabled=0 if current["enabled"] else 1)
+        if not ok:
+            raise HTTPException(status_code=500, detail="操作失败")
+        return {"success": True, "message": "已更新"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"切换问答状态失败: {str(e)}")
+
+
 class ProductVariantBindingIn(BaseModel):
     display_name: str = ""
     spec_text: str = ""

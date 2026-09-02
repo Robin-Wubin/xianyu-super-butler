@@ -20,6 +20,7 @@ import {
 } from '../services/api';
 import { notify } from '../services/feedback';
 import { EmptyState, PageHeader, PageLoading, SectionHeader } from './ui';
+import QAKnowledgeBase from './QAKnowledgeBase';
 
 // 自建中转，兼容 OpenAI 接口，每天可领免费额度，省去用户自己找服务商配密钥。
 const FREE_TOKEN_BASE_URL = 'https://ai.corleom.com/v1';
@@ -423,6 +424,8 @@ const AIReply: React.FC = () => {
               </section>
             </aside>
           </div>
+
+          <QAKnowledgeBase accountId={selectedAccountId} />
 
         </>
       )}

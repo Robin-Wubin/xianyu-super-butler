@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  BookMarked,
   Image,
   Inbox,
   Loader2,
@@ -14,6 +15,7 @@ import {
   Zap,
   Trash2,
   UserRound,
+  X,
 } from 'lucide-react';
 
 import {
@@ -29,6 +31,7 @@ import {
 import {
   batchCreateMessageFilters,
   batchDeleteMessageFilters,
+  createQAPair,
   deleteMessageFilter,
   getAccountDetails,
   getChatAccounts,
@@ -196,6 +199,36 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
   const [newKeywords, setNewKeywords] = useState('');
   const [selectedFilterIds, setSelectedFilterIds] = useState<number[]>([]);
   const [savingFilters, setSavingFilters] = useState(false);
+
+  // ===== AI 问答库节选收录 =====
+  // selectMode: 开启后消息气泡可点选，先选一条买家消息做「问」，再选一条
+  // 自己的回复做「答」，弹窗确认后存入问答库（跟随当前会话的商品归属）。
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedQuestion, setSelectedQuestion] = useState<ChatMessage | null>(null);
+  const [selectedAnswer, setSelectedAnswer] = useState<ChatMessage | null>(null);
+  const [qaDialogOpen, setQaDialogOpen] = useState(false);
+  const [qaSaving, setQaSaving] = useState(false);
+  const [qaScopeItemId, setQaScopeItemId] = useState<string | null>(null); // ''=通用 null=用会话商品
+  const toggleSelectMode = () => {
+    setSelectMode((current) => !current);
+    setSelectedQuestion(null);
+    setSelectedAnswer(null);
+  };
+  const pickMessage = (message: ChatMessage) => {
+    if (!selectMode) return;
+    if (!message.text || message.type === 'system') return;
+    if (!message.isSelf) {
+      setSelectedQuestion(message);
+      if (!selectedAnswer) return;
+    } else {
+      setSelectedAnswer(message);
+      if (!selectedQuestion) return;
+    }
+    if ((!message.isSelf && selectedAnswer) || (message.isSelf && selectedQuestion)) {
+      setQaScopeItemId(activeConversation?.itemId || '');
+      setQaDialogOpen(true);
+    }
+  };
 
   const activeAccount = accounts.find((account) => account.accountId === activeAccountId);
   const activeConversation = conversations.find((conversation) => conversation.cid === activeCid);
@@ -658,7 +691,7 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
         {activeConversation ? (
           <>
             <header className="flex h-[68px] shrink-0 items-center justify-between border-b border-[var(--border)] px-5">
-              <div className="flex min-w-0 items-center gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setMobilePane('list')}
@@ -677,14 +710,38 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
                   </p>
                 </div>
               </div>
-              <span className={`inline-flex items-center gap-1.5 text-xs font-bold ${
-                activeAccount?.connected ? 'text-emerald-600' : 'text-[#999]'
-              }`}>
-                <span className={`h-2 w-2 rounded-full ${
-                  activeAccount?.connected ? 'bg-emerald-500' : 'bg-[#b8ac8e]'
-                }`} />
-                {activeAccount?.connected ? '账号在线' : '账号离线'}
-              </span>
+              <div className="flex shrink-0 items-center gap-2">
+                {selectMode && (
+                  <span className="hidden text-xs text-blue-600 sm:inline">
+                    {selectedQuestion && selectedAnswer
+                      ? '已选好问答'
+                      : selectedQuestion
+                        ? '再点一条自己的回复作答'
+                        : '点一条买家消息作问'}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={toggleSelectMode}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold ${
+                    selectMode
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-[var(--surface-strong)] text-[var(--text)] hover:bg-[var(--surface-hover)]'
+                  }`}
+                  title={selectMode ? '退出节选模式' : '节选对话收录为 AI 问答'}
+                >
+                  <BookMarked className="h-4 w-4" />
+                  {selectMode ? '退出节选' : '节选问答'}
+                </button>
+                <span className={`inline-flex items-center gap-1.5 text-xs font-bold ${
+                  activeAccount?.connected ? 'text-emerald-600' : 'text-[#999]'
+                }`}>
+                  <span className={`h-2 w-2 rounded-full ${
+                    activeAccount?.connected ? 'bg-emerald-500' : 'bg-[#b8ac8e]'
+                  }`} />
+                  {activeAccount?.connected ? '账号在线' : '账号离线'}
+                </span>
+              </div>
             </header>
 
             <div className="flex min-h-[84px] shrink-0 items-center gap-3 border-b border-[var(--border)] px-4 py-3 sm:min-h-[92px] sm:gap-4 sm:px-5">
@@ -731,6 +788,9 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
                     const senderLabel = message.isSelf
                       ? accountName(activeAccount)
                       : activeConversation.otherUserName || activeConversation.otherUserId;
+                    const isPickedQuestion = selectedQuestion?.messageId === message.messageId;
+                    const isPickedAnswer = selectedAnswer?.messageId === message.messageId;
+                    const selectable = selectMode && message.text && message.type !== 'system';
                     return (
                       <div key={message.messageId || `${message.time}-${index}`}>
                         {showTime && (
@@ -744,9 +804,19 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
                             senderLabel,
                             'h-9 w-9 shrink-0 rounded-full'
                           )}
-                          <div className={`max-w-[76%] rounded-md px-3.5 py-2.5 text-sm leading-6 ${
-                            message.isSelf ? 'bg-[var(--brand)] text-[var(--brand-ink)]' : 'bg-[var(--surface-strong)] text-[var(--text)]'
-                          }`}>
+                          <div
+                            role={selectable ? 'button' : undefined}
+                            onClick={selectable ? () => pickMessage(message) : undefined}
+                            title={selectable
+                              ? (message.isSelf ? '点选作为「答」' : '点选作为「问」')
+                              : undefined}
+                            className={`max-w-[76%] rounded-md px-3.5 py-2.5 text-sm leading-6 ${
+                              message.isSelf ? 'bg-[var(--brand)] text-[var(--brand-ink)]' : 'bg-[var(--surface-strong)] text-[var(--text)]'
+                            } ${selectable ? 'cursor-pointer transition hover:opacity-80' : ''} ${
+                              isPickedQuestion ? 'ring-2 ring-blue-500 ring-offset-1' : ''
+                            } ${
+                              isPickedAnswer ? 'ring-2 ring-emerald-500 ring-offset-1' : ''
+                            }`}>
                             {message.images.map((url) => (
                               <img
                                 key={url}
@@ -1046,7 +1116,113 @@ const MessageManagement: React.FC<MessageManagementProps> = ({ isActive = true }
     </div>
   );
 
-  return view === 'messages' ? renderMessages() : renderFilters();
+  const saveQAPair = async () => {
+    if (!selectedQuestion?.text || !selectedAnswer?.text) return;
+    setQaSaving(true);
+    try {
+      await createQAPair(activeAccountId, {
+        question: selectedQuestion.text,
+        answer: selectedAnswer.text,
+        item_id: qaScopeItemId ?? activeConversation?.itemId ?? '',
+        source: 'chat',
+      });
+      notify('问答已收录进 AI 问答库', 'success');
+      setQaDialogOpen(false);
+      setSelectedQuestion(null);
+      setSelectedAnswer(null);
+      setSelectMode(false);
+    } catch (error) {
+      notify(`收录失败：${(error as Error).message}`, 'error');
+    } finally {
+      setQaSaving(false);
+    }
+  };
+
+  const renderQADialog = () => {
+    if (!qaDialogOpen || !selectedQuestion?.text || !selectedAnswer?.text) return null;
+    const scopeOptions: Array<{ value: string; label: string }> = [];
+    if (activeConversation?.itemId) {
+      scopeOptions.push({
+        value: activeConversation.itemId,
+        label: `仅当前商品（${activeConversation.itemTitle || activeConversation.itemId}）`,
+      });
+    }
+    scopeOptions.push({ value: '', label: '账号通用（所有商品共享）' });
+    const currentScope = qaScopeItemId ?? activeConversation?.itemId ?? '';
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div className="w-full max-w-lg rounded-lg bg-[var(--surface)] p-5 shadow-xl">
+          <div className="mb-3 flex items-center justify-between">
+            <h4 className="text-base font-bold text-[var(--text)]">收录为 AI 问答</h4>
+            <button
+              type="button"
+              onClick={() => setQaDialogOpen(false)}
+              className="rounded-md p-1 hover:bg-[var(--surface-hover)]"
+              aria-label="关闭"
+            >
+              <X className="h-4 w-4 text-[var(--text-muted)]" />
+            </button>
+          </div>
+          <div className="space-y-3 text-sm">
+            <div className="rounded-md bg-[var(--surface-strong)] p-3">
+              <p className="mb-1 text-xs font-bold text-blue-600">问（买家消息）</p>
+              <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[var(--text)]">
+                {selectedQuestion.text}
+              </p>
+            </div>
+            <div className="rounded-md bg-[var(--surface-strong)] p-3">
+              <p className="mb-1 text-xs font-bold text-emerald-600">答（你的回复）</p>
+              <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[var(--text)]">
+                {selectedAnswer.text}
+              </p>
+            </div>
+            <div>
+              <p className="mb-1.5 text-xs font-bold text-[var(--text-muted)]">生效范围</p>
+              <select
+                value={currentScope}
+                onChange={(event) => setQaScopeItemId(event.target.value)}
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text)]"
+              >
+                {scopeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-[11px] text-[var(--text-soft)]">
+                收录后 AI 回复时会参考这条问答的口径，可在「AI 回复 → 问答库」中管理。
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setQaDialogOpen(false)}
+              className="rounded-md px-4 py-2 text-sm font-bold text-[var(--text-muted)] hover:bg-[var(--surface-hover)]"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={qaSaving}
+              onClick={() => void saveQAPair()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {qaSaving && <Loader2 className="h-4 w-4 animate-spin" />}
+              收录
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return view === 'messages' ? (
+    <>
+      {renderMessages()}
+      {renderQADialog()}
+    </>
+  ) : (
+    renderFilters()
+  );
 };
 
 export default MessageManagement;

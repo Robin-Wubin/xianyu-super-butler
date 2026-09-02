@@ -75,4 +75,8 @@ export const del = async <T = unknown>(
   return response.data;
 };
 
+// PATCH 请求没有专用包装（GET/POST/PUT/DELETE 都有），命名导出同一个实例供
+// services/api.ts 直接调用 request.patch(...)。
+export { request };
+
 export default request;

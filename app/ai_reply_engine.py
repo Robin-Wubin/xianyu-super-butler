@@ -415,6 +415,32 @@ class AIReplyEngine:
             logger.error(f"构建买家订单上下文失败: {e}")
             return ""
 
+    def build_qa_context(self, cookie_id: str, item_id: str, max_pairs: int = 15) -> str:
+        """构建问答库上下文：商品级专属优先 + 账号通用兜底。
+
+        卖家从真实对话节选的问答对，是「已经被验证过的好答案」，
+        比 AI 自己编的可靠。商品级排前、通用排后，各最多 max_pairs 条。
+        """
+        try:
+            pairs = db_manager.get_qa_pairs(cookie_id, item_id or None) if item_id else \
+                db_manager.get_qa_pairs(cookie_id, '', include_disabled=False)
+            if not pairs:
+                return ""
+            item_qa = [p for p in pairs if p.get('item_id')]
+            global_qa = [p for p in pairs if not p.get('item_id')]
+            picked = item_qa[:max_pairs] + global_qa[:max(max_pairs - len(item_qa[:max_pairs]), 0)]
+            if not picked:
+                return ""
+            lines = ["以下是卖家整理的常见问答（优先参考这些口径回答，尤其当前商品的专属问答）："]
+            for p in picked:
+                tag = "【当前商品】" if p.get('item_id') else "【通用】"
+                lines.append(f"{tag}问：{p.get('question')}")
+                lines.append(f"{tag}答：{p.get('answer')}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"构建问答库上下文失败: {e}")
+            return ""
+
     def _resolve_system_prompt(self, raw_prompts: str, intent: str) -> str:
         """兼容旧版 JSON 提示词和新版纯文本风格说明。"""
         base_prompt = self.default_prompts.get(intent, self.default_prompts['default'])
@@ -757,6 +783,10 @@ class AIReplyEngine:
                 # 该怎么应对（已成交买家不推销、优先解决物流/使用问题）
                 order_context = self.build_order_context(cookie_id, user_id, item_id)
 
+                # 7.6 问答库上下文：卖家从真实对话节选/手写的标准问答，
+                # 商品级专属优先 + 通用兜底，让 AI 按验证过的口径回答
+                qa_context = self.build_qa_context(cookie_id, item_id)
+
                 # 8. 构建角色化对话消息
                 max_bargain_rounds = settings.get('max_bargain_rounds', 3)
                 max_discount_percent = settings.get('max_discount_percent', 10)
@@ -768,7 +798,7 @@ class AIReplyEngine:
 {item_desc}
 
 {order_context}
-
+{qa_context}
 议价设置：
 - 当前议价次数：{bargain_count}
 - 最大议价轮数：{max_bargain_rounds}
