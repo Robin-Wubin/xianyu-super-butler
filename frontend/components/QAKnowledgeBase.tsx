@@ -418,12 +418,13 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
                     setGenItemId(event.target.value);
                     setGenPairs(null);
                   }}
-                  className="max-w-56 flex-1 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1"
+                  className="max-w-72 flex-1 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1"
                 >
                   <option value="">选择商品…</option>
                   {accountItems.map((item) => (
                     <option key={item.item_id} value={item.item_id}>
-                      {item.title?.slice(0, 22) || item.item_id}
+                      {item.item_title?.slice(0, 24) || item.item_id}
+                      {item.item_price ? ` · ¥${item.item_price}` : ''}
                     </option>
                   ))}
                 </select>
