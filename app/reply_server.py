@@ -435,7 +435,9 @@ async def serve_frontend():
     index_path = os.path.join(static_dir, 'index.html')
     if os.path.exists(index_path):
         with open(index_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
+            # no-cache：index.html 每次都向服务器校验，避免浏览器启发式缓存
+            # 旧 index 导致引用旧 bundle（带 hash 的 assets 由 ETag 协商缓存）
+            return HTMLResponse(f.read(), headers={'Cache-Control': 'no-cache, must-revalidate'})
     else:
         return HTMLResponse('<h3>Frontend not found. Please build the frontend first.</h3>')
 
