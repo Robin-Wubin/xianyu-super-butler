@@ -1262,6 +1262,39 @@ class DBManager:
         'auto_thanks_enabled': False,
     }
 
+    def get_buyer_order_context(self, cookie_id: str, buyer_id: str, item_id: str = None) -> List[dict]:
+        """查买家在某账号下的订单，供 AI 区分售前/售后。
+
+        buyer_id + item_id 都匹配时是「该商品已成交」的精确信号；
+        只按 buyer_id 查（item_id 为空）时返回该买家的全部订单，
+        调用方可判断是否老买家。按时间倒序，最多 5 条。
+        """
+        if not buyer_id:
+            return []
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                if item_id:
+                    self._execute_sql(cursor, '''
+                        SELECT order_id, item_id, order_status, quantity, amount, created_at
+                        FROM orders
+                        WHERE cookie_id = ? AND buyer_id = ? AND item_id = ?
+                        ORDER BY created_at DESC LIMIT 5
+                    ''', (cookie_id, buyer_id, item_id))
+                else:
+                    self._execute_sql(cursor, '''
+                        SELECT order_id, item_id, order_status, quantity, amount, created_at
+                        FROM orders
+                        WHERE cookie_id = ? AND buyer_id = ?
+                        ORDER BY created_at DESC LIMIT 5
+                    ''', (cookie_id, buyer_id))
+                rows = cursor.fetchall()
+            keys = ('order_id', 'item_id', 'order_status', 'quantity', 'amount', 'created_at')
+            return [dict(zip(keys, r)) for r in rows]
+        except Exception as e:
+            logger.error(f"查询买家订单上下文失败 {cookie_id}/{buyer_id}: {e}")
+            return []
+
     def get_buyer_interaction_settings(self, cookie_id: str) -> dict:
         """读取指定账号的买家互动开关（评价 / 求花 / 确认收货致谢）。"""
         try:

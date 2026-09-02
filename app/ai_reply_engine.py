@@ -359,6 +359,62 @@ class AIReplyEngine:
             raise last_exc
         return None
 
+    # 订单状态到「买家视角描述」的映射，注入提示词用
+    ORDER_STATUS_DESC = {
+        'completed': '已完成（买家已确认收货）',
+        'shipped': '已发货，运输中',
+        'paid': '已付款，等待发货',
+        'refunding': '退款/售后处理中',
+        'cancelled': '已取消',
+        'unknown': '状态未知',
+    }
+
+    def build_order_context(self, cookie_id: str, user_id: str, item_id: str) -> str:
+        """按订单数据判断买家与该商品的关系（售前/售后），生成提示词片段。
+
+        判定逻辑：
+        - 该买家在该商品上有「未取消」的订单 → 售后场景（completed/shipped/
+          paid/refunding 各自细分），AI 应围绕物流/使用/售后答复，避免再推销；
+        - 有订单但全是取消 → 视为售前（此前交易未成）；
+        - 无该商品订单但买过其他商品 → 老买家售前；
+        - 完全无订单 → 纯售前。
+        """
+        try:
+            orders = db_manager.get_buyer_order_context(cookie_id, user_id, item_id) if item_id else []
+            all_orders = db_manager.get_buyer_order_context(cookie_id, user_id, None)
+            if not orders and not all_orders:
+                return "买家订单情况：该买家没有历史订单，属于首次咨询的售前买家。"
+
+            lines = []
+            if orders:
+                valid = [o for o in orders if (o.get('order_status') or '') not in ('cancelled',)]
+                if valid:
+                    lines.append("买家订单情况：该买家已购买当前咨询的商品，属于售后场景。")
+                    for o in valid[:3]:
+                        status = self.ORDER_STATUS_DESC.get(o.get('order_status'), o.get('order_status') or '未知')
+                        lines.append(
+                            f"- 订单 {o.get('order_id')}：{status}，数量 {o.get('quantity') or 1}，"
+                            f"实付 {o.get('amount') or '?'} 元，下单时间 {o.get('created_at') or '?'}"
+                        )
+                    lines.append("应对要点：这是已成交买家，优先解决物流/使用/售后问题，不要再推销或引导重复下单。")
+                    return "\n".join(lines)
+                lines.append("买家订单情况：该买家曾拍下当前商品但订单已取消，本次属于售前咨询。")
+            elif all_orders:
+                lines.append("买家订单情况：该买家买过本店其他商品，但未购买当前咨询的商品，属于老买家售前咨询。")
+            else:
+                lines.append("买家订单情况：该买家没有当前商品的订单，属于售前咨询。")
+            other = [o for o in all_orders if (o.get('order_status') or '') not in ('cancelled',)]
+            if other:
+                lines.append("历史成交记录（其他商品）：")
+                for o in other[:3]:
+                    status = self.ORDER_STATUS_DESC.get(o.get('order_status'), o.get('order_status') or '未知')
+                    lines.append(f"- {o.get('item_id')}：{status}，{o.get('created_at') or '?'}")
+                lines.append("应对要点：老买家可以适当更热情，但当前商品按售前流程介绍。")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"构建买家订单上下文失败: {e}")
+            return ""
+
     def _resolve_system_prompt(self, raw_prompts: str, intent: str) -> str:
         """兼容旧版 JSON 提示词和新版纯文本风格说明。"""
         base_prompt = self.default_prompts.get(intent, self.default_prompts['default'])
@@ -697,6 +753,10 @@ class AIReplyEngine:
                 item_desc += f"商品价格: {item_info.get('price', '未知')}元\n"
                 item_desc += f"商品描述: {item_info.get('desc', '无')}"
 
+                # 7.5 买家订单上下文：用订单数据区分售前/售后，让 AI 知道
+                # 该怎么应对（已成交买家不推销、优先解决物流/使用问题）
+                order_context = self.build_order_context(cookie_id, user_id, item_id)
+
                 # 8. 构建角色化对话消息
                 max_bargain_rounds = settings.get('max_bargain_rounds', 3)
                 max_discount_percent = settings.get('max_discount_percent', 10)
@@ -706,6 +766,8 @@ class AIReplyEngine:
 
 商品与业务事实：
 {item_desc}
+
+{order_context}
 
 议价设置：
 - 当前议价次数：{bargain_count}
