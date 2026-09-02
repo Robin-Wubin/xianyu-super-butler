@@ -157,6 +157,10 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
     }
   };
 
+  const updateGenPair = (idx: number, field: 'question' | 'answer', value: string) => {
+    setGenPairs((prev) => (prev ? prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)) : prev));
+  };
+
   const handleConfirmGen = async () => {
     if (!selectedAccount || !genPairs) return;
     const picked = genPairs.filter((_, idx) => genSelected.has(idx));
@@ -479,13 +483,13 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
                     </div>
                   </div>
                   {genPairs.map((pair, idx) => (
-                    <label
+                    <div
                       key={idx}
-                      className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] p-2 hover:border-violet-400"
+                      className="flex items-start gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] p-2"
                     >
                       <input
                         type="checkbox"
-                        className="mt-0.5"
+                        className="mt-2"
                         checked={genSelected.has(idx)}
                         onChange={() => {
                           const next = new Set(genSelected);
@@ -497,11 +501,27 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
                           setGenSelected(next);
                         }}
                       />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-bold">问：{pair.question}</p>
-                        <p className="mt-0.5 text-xs text-[var(--text-soft)]">答：{pair.answer}</p>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-start gap-1.5">
+                          <span className="mt-1 shrink-0 text-xs font-bold">问</span>
+                          <textarea
+                            value={pair.question}
+                            onChange={(event) => updateGenPair(idx, 'question', event.target.value)}
+                            rows={1}
+                            className="w-full resize-y rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-xs"
+                          />
+                        </div>
+                        <div className="flex items-start gap-1.5">
+                          <span className="mt-1 shrink-0 text-xs text-[var(--text-soft)]">答</span>
+                          <textarea
+                            value={pair.answer}
+                            onChange={(event) => updateGenPair(idx, 'answer', event.target.value)}
+                            rows={2}
+                            className="w-full resize-y rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-1 text-xs"
+                          />
+                        </div>
                       </div>
-                    </label>
+                    </div>
                   ))}
                 </div>
               )}
