@@ -410,7 +410,11 @@ memory_*.dump
 cpu_*.profile
 
 # 机器学习模型文件（如果有AI功能扩展）
-models/
+models/*
+# 但问答库 RAG 的本地嵌入模型要进仓库（23MB int8 量化版，部署即用）
+!models/bge-small-zh-v1.5/
+!models/bge-small-zh-v1.5/model_quantized.onnx
+!models/bge-small-zh-v1.5/tokenizer.json
 *.model
 *.weights
 *.checkpoint
@@ -610,10 +614,14 @@ keys/
 *.weights
 *.h5
 *.pb
-*.onnx
 *.tflite
-models/
 checkpoints/
+# 问答库 RAG 的本地嵌入模型例外：必须随仓库分发（int8 量化仅 23MB）
+!models/bge-small-zh-v1.5/
+!models/bge-small-zh-v1.5/model_quantized.onnx
+!models/bge-small-zh-v1.5/tokenizer.json
+models/*
+!models/bge-small-zh-v1.5/
 
 # 媒体文件（避免提交大文件）
 *.mp4
@@ -771,6 +779,8 @@ keywords_*.xlsx
 *.h5
 *.pb
 *.onnx
+# 问答库 RAG 的本地嵌入模型例外：必须随仓库分发（int8 量化仅 23MB）
+!models/bge-small-zh-v1.5/model_quantized.onnx
 checkpoints/**
 
 # 性能分析文件

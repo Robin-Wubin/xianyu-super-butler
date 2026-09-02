@@ -887,6 +887,59 @@ export const toggleQAPair = async (cookieId: string, qaId: number): Promise<ApiR
     return request(`/ai-qa/${cookieId}/${qaId}/toggle`, { method: 'PATCH' });
 }
 
+// ---- 问答库 RAG（本地向量检索） ----
+
+export interface QARagStatus {
+    model_available: boolean;
+    enabled_count: number;
+    indexed_count: number;
+}
+
+export const getQARagStatus = async (cookieId: string): Promise<QARagStatus> => {
+    const result = await get<{ success: boolean; data: QARagStatus }>(`/ai-qa/${cookieId}/rag-status`);
+    return result?.data || { model_available: false, enabled_count: 0, indexed_count: 0 };
+}
+
+export const rebuildQAIndex = async (cookieId: string): Promise<ApiResponse> => {
+    return post(`/ai-qa/${cookieId}/rebuild-index`, {});
+}
+
+export interface QASearchResult {
+    id: number;
+    item_id: string;
+    question: string;
+    answer: string;
+    score: number;
+}
+
+export const searchQA = async (
+    cookieId: string,
+    query: string,
+    itemId?: string,
+): Promise<{ results: QASearchResult[]; threshold: number }> => {
+    const result = await post<{ success: boolean; data: { results: QASearchResult[]; threshold: number } }>(
+        `/ai-qa/${cookieId}/search`,
+        { query, item_id: itemId || '' },
+    );
+    return result?.data || { results: [], threshold: 0.4 };
+}
+
+// RAG 检索参数（全局）：相似度阈值 + 注入条数上限
+export interface QARagParams {
+    sim_threshold: number;
+    top_k: number;
+}
+
+export const getQARagParams = async (): Promise<QARagParams> => {
+    const result = await get<{ success: boolean; data: QARagParams }>('/ai-qa-settings/rag-params');
+    return result?.data || { sim_threshold: 0.45, top_k: 5 };
+}
+
+export const updateQARagParams = async (params: Partial<QARagParams>): Promise<QARagParams> => {
+    const result = await put<ApiResponse & { data: QARagParams }>('/ai-qa-settings/rag-params', params);
+    return (result as { data?: QARagParams })?.data || { sim_threshold: 0.45, top_k: 5 };
+}
+
 export const updateItemAIConfig = async (
     cookieId: string,
     itemId: string,

@@ -415,11 +415,17 @@ class AIReplyEngine:
             logger.error(f"构建买家订单上下文失败: {e}")
             return ""
 
-    def build_qa_context(self, cookie_id: str, item_id: str, max_pairs: int = 15) -> str:
+    def build_qa_context(self, cookie_id: str, item_id: str, max_pairs: int = 15,
+                         query_text: str = '') -> str:
         """构建问答库上下文：商品级专属优先 + 账号通用兜底。
 
         卖家从真实对话节选的问答对，是「已经被验证过的好答案」，
-        比 AI 自己编的可靠。商品级排前、通用排后，各最多 max_pairs 条。
+        比 AI 自己编的可靠。
+
+        query_text 非空且本地嵌入模型可用时走 RAG 语义检索：
+        按与买家消息的相关度挑 top-K（商品级、通用各自排序），
+        只注入真正相关的问答，避免问答库变大后提示词膨胀。
+        任何环节失败都自动回退为全量注入（按原逻辑），不影响回复主流程。
         """
         try:
             pairs = db_manager.get_qa_pairs(cookie_id, item_id or None) if item_id else \
@@ -428,7 +434,15 @@ class AIReplyEngine:
                 return ""
             item_qa = [p for p in pairs if p.get('item_id')]
             global_qa = [p for p in pairs if not p.get('item_id')]
-            picked = item_qa[:max_pairs] + global_qa[:max(max_pairs - len(item_qa[:max_pairs]), 0)]
+
+            picked = None
+            if query_text:
+                picked = self._retrieve_qa_by_similarity(cookie_id, item_id, query_text, item_qa, global_qa)
+                if picked is None:
+                    logger.info("[QA-RAG] 语义检索不可用，回退全量注入")
+
+            if picked is None:
+                picked = item_qa[:max_pairs] + global_qa[:max(max_pairs - len(item_qa[:max_pairs]), 0)]
             if not picked:
                 return ""
             lines = ["以下是卖家整理的常见问答（优先参考这些口径回答，尤其当前商品的专属问答）："]
@@ -440,6 +454,91 @@ class AIReplyEngine:
         except Exception as e:
             logger.error(f"构建问答库上下文失败: {e}")
             return ""
+
+    # RAG 检索：相似度阈值（低于此分数的问答视为无关，不注入）。
+    # 默认 0.45：BGE 中文短文本基线相似度偏高（无关问题也有 0.4+），
+    # 0.40 会把无关问答也注入。可在系统设置 qa_sim_threshold 调整。
+    QA_SIM_THRESHOLD = 0.45
+    # RAG 检索：商品级/通用各自最多注入的条数（系统设置 qa_top_k 可调）
+    QA_TOP_K = 5
+
+    def _qa_rag_params(self) -> tuple:
+        """从系统设置读取 RAG 参数（失效时用默认值）。返回 (threshold, top_k)。"""
+        try:
+            raw_t = db_manager.get_system_setting('qa_sim_threshold')
+            raw_k = db_manager.get_system_setting('qa_top_k')
+            threshold = float(raw_t) if raw_t else self.QA_SIM_THRESHOLD
+            top_k = int(raw_k) if raw_k else self.QA_TOP_K
+            # 合法范围保护
+            threshold = min(max(threshold, 0.0), 1.0)
+            top_k = min(max(top_k, 1), 20)
+            return threshold, top_k
+        except Exception:
+            return self.QA_SIM_THRESHOLD, self.QA_TOP_K
+
+    def _retrieve_qa_by_similarity(self, cookie_id: str, item_id: str,
+                                   query_text: str,
+                                   item_qa: list, global_qa: list):
+        """按语义相关度挑选问答。
+
+        返回 [(pair, score), ...] 展平后的 pair 列表（商品级在前），
+        检索不可用（模型缺失/向量未索引/推理失败）返回 None，
+        调用方回退全量注入。
+        """
+        from app import qa_embedder
+        if not qa_embedder.available():
+            return None
+        try:
+            import numpy as np
+            threshold, top_k = self._qa_rag_params()
+
+            def score_pool(pool: list):
+                """对一组问答池做语义检索，返回 [(pair, score)] 按分数降序。"""
+                if not pool:
+                    return []
+                embeddings = db_manager.get_qa_embeddings_for_account(cookie_id, item_id or None)
+                if not embeddings:
+                    return None  # 一条都没索引过：视为未启用 RAG
+                vec_by_id = {e['qa_id']: e['embedding'] for e in embeddings}
+                q_vec = qa_embedder.embed_one(query_text)
+                if q_vec is None:
+                    return None
+                q_arr = np.asarray(q_vec, dtype=np.float32)
+                scored = []
+                for p in pool:
+                    blob = vec_by_id.get(p['id'])
+                    if blob is None:
+                        # 这条没索引：语义相似度未知，不参与排序也不丢弃，
+                        # 按 0 分垫底（由调用方决定是否兜底带上）。
+                        continue
+                    dim = len(blob) // 4
+                    vec = np.frombuffer(blob, dtype='<f4', count=dim)
+                    score = float(np.dot(q_arr, vec))
+                    if score >= threshold:
+                        scored.append((p, score))
+                scored.sort(key=lambda x: -x[1])
+                return scored
+
+            item_scored = score_pool(item_qa)
+            global_scored = score_pool(global_qa)
+            if item_scored is None and global_scored is None:
+                return None
+
+            picked_item = (item_scored or [])[:top_k]
+            picked_global = (global_scored or [])[:top_k]
+            result = [p for p, _ in picked_item] + [p for p, _ in picked_global]
+            if not result:
+                # 没有任何问答过阈值：一条都不注入（买家问题与库无关，
+                # 全量注入反而会干扰 AI 按自由发挥回答）。
+                logger.info(f"[QA-RAG] 无问答过相似度阈值({threshold})，本轮不注入问答库")
+            else:
+                top_desc = " / ".join(
+                    f"{(p.get('question') or '')[:12]}…({s:.2f})" for p, s in (picked_item + picked_global)[:3])
+                logger.info(f"[QA-RAG] 语义检索命中 {len(result)} 条: {top_desc}")
+            return result
+        except Exception as e:
+            logger.warning(f"[QA-RAG] 语义检索异常，回退全量注入: {e}")
+            return None
 
     def _resolve_system_prompt(self, raw_prompts: str, intent: str) -> str:
         """兼容旧版 JSON 提示词和新版纯文本风格说明。"""
@@ -784,8 +883,9 @@ class AIReplyEngine:
                 order_context = self.build_order_context(cookie_id, user_id, item_id)
 
                 # 7.6 问答库上下文：卖家从真实对话节选/手写的标准问答，
-                # 商品级专属优先 + 通用兜底，让 AI 按验证过的口径回答
-                qa_context = self.build_qa_context(cookie_id, item_id)
+                # 商品级专属优先 + 通用兜底；带买家消息走 RAG 语义检索，
+                # 只注入与当前问题相关的问答，避免库变大后提示词膨胀
+                qa_context = self.build_qa_context(cookie_id, item_id, query_text=message)
 
                 # 8. 构建角色化对话消息
                 max_bargain_rounds = settings.get('max_bargain_rounds', 3)

@@ -5699,6 +5699,8 @@ def create_qa_pair(cookie_id: str, payload: QAPairIn,
             item_id=payload.item_id or '', source=payload.source or 'manual')
         if not qa_id:
             raise HTTPException(status_code=500, detail="保存失败")
+        # RAG：新增即建向量索引（模型缺失时静默跳过，检索时回退全量）
+        db_manager.reindex_qa_embedding(qa_id, cookie_id)
         return {"success": True, "message": "问答已收录", "data": {"id": qa_id}}
     except HTTPException:
         raise
@@ -5719,6 +5721,8 @@ def modify_qa_pair(cookie_id: str, qa_id: int, payload: QAPairIn,
             item_id=payload.item_id or '')
         if not ok:
             raise HTTPException(status_code=404, detail="问答不存在或未变更")
+        # RAG：内容变了向量要重算（模型缺失时静默跳过）
+        db_manager.reindex_qa_embedding(qa_id, cookie_id)
         return {"success": True, "message": "问答已更新"}
     except HTTPException:
         raise
@@ -5735,6 +5739,8 @@ def remove_qa_pair(cookie_id: str, qa_id: int,
         from app.db_manager import db_manager
         if not db_manager.delete_qa_pair(qa_id, cookie_id):
             raise HTTPException(status_code=404, detail="问答不存在")
+        # RAG：同步清掉向量索引
+        db_manager.delete_qa_embedding(qa_id)
         return {"success": True, "message": "问答已删除"}
     except HTTPException:
         raise
@@ -5756,11 +5762,173 @@ def toggle_qa_pair(cookie_id: str, qa_id: int,
         ok = db_manager.update_qa_pair(qa_id, cookie_id, enabled=0 if current["enabled"] else 1)
         if not ok:
             raise HTTPException(status_code=500, detail="操作失败")
+        # RAG：停用时清向量（不参与检索），重新启用时补索引
+        if current["enabled"]:
+            db_manager.delete_qa_embedding(qa_id)
+        else:
+            db_manager.reindex_qa_embedding(qa_id, cookie_id)
         return {"success": True, "message": "已更新"}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"切换问答状态失败: {str(e)}")
+
+
+# ---- 问答库 RAG（本地向量检索） ----
+
+@app.get("/ai-qa/{cookie_id}/rag-status")
+def get_qa_rag_status(cookie_id: str,
+                      current_user: Dict[str, Any] = Depends(get_current_user)):
+    """问答库 RAG 状态：模型是否可用、索引覆盖率。"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app import qa_embedder
+        from app.db_manager import db_manager
+        pairs = db_manager.get_qa_pairs(cookie_id, None, include_disabled=True)
+        enabled_pairs = [p for p in pairs if p.get("enabled")]
+        indexed = 0
+        for p in enabled_pairs:
+            if db_manager.get_qa_embedding(p["id"]) is not None:
+                indexed += 1
+        return {
+            "success": True,
+            "data": {
+                "model_available": qa_embedder.available(),
+                "enabled_count": len(enabled_pairs),
+                "indexed_count": indexed,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取RAG状态失败: {str(e)}")
+
+
+@app.post("/ai-qa/{cookie_id}/rebuild-index")
+def rebuild_qa_index(cookie_id: str,
+                     current_user: Dict[str, Any] = Depends(get_current_user)):
+    """重建账号全部问答向量索引（新增/编辑问答会自动索引，此接口兜底全量重建）。"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app import qa_embedder
+        from app.db_manager import db_manager
+        if not qa_embedder.available():
+            raise HTTPException(status_code=503, detail="本地嵌入模型不可用（models/bge-small-zh-v1.5 缺失或加载失败）")
+        pairs = db_manager.get_qa_pairs(cookie_id, None, include_disabled=True)
+        enabled_pairs = [p for p in pairs if p.get("enabled")]
+        # 失效的问答不保留向量（停用后不参与检索）
+        db_manager.delete_qa_embeddings_by_account(cookie_id)
+        ok_count = 0
+        for p in enabled_pairs:
+            if db_manager.reindex_qa_embedding(p["id"], cookie_id):
+                ok_count += 1
+        return {
+            "success": True,
+            "message": f"索引重建完成：{ok_count}/{len(enabled_pairs)} 条成功",
+            "data": {"indexed": ok_count, "total": len(enabled_pairs)},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重建索引失败: {str(e)}")
+
+
+class QASearchIn(BaseModel):
+    query: str
+    item_id: Optional[str] = ""
+
+
+@app.post("/ai-qa/{cookie_id}/search")
+def search_qa(cookie_id: str, payload: QASearchIn,
+              current_user: Dict[str, Any] = Depends(get_current_user)):
+    """检索测试：输入模拟买家消息，返回语义命中的问答及相似度分数。"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app import qa_embedder
+        from app.ai_reply_engine import ai_reply_engine
+        from app.db_manager import db_manager
+        query = (payload.query or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="请输入模拟买家消息")
+        if not qa_embedder.available():
+            raise HTTPException(status_code=503, detail="本地嵌入模型不可用，无法语义检索")
+
+        import numpy as np
+        q_vec = qa_embedder.embed_one(query)
+        if q_vec is None:
+            raise HTTPException(status_code=500, detail="向量推理失败")
+        q_arr = np.asarray(q_vec, dtype=np.float32)
+        item_id = payload.item_id or ""
+        pairs = db_manager.get_qa_pairs(cookie_id, item_id or None) if item_id else \
+            db_manager.get_qa_pairs(cookie_id, '', include_disabled=False)
+        pairs = [p for p in pairs if p.get("enabled")]
+        embeddings = db_manager.get_qa_embeddings_for_account(cookie_id, item_id or None)
+        vec_by_id = {e["qa_id"]: e["embedding"] for e in embeddings}
+
+        results = []
+        for p in pairs:
+            blob = vec_by_id.get(p["id"])
+            if blob is None:
+                continue
+            dim = len(blob) // 4
+            vec = np.frombuffer(blob, dtype="<f4", count=dim)
+            score = float(np.dot(q_arr, vec))
+            results.append({
+                "id": p["id"],
+                "item_id": p.get("item_id") or "",
+                "question": p["question"],
+                "answer": p["answer"][:200],
+                "score": round(score, 4),
+            })
+        results.sort(key=lambda r: -r["score"])
+        threshold, _ = ai_reply_engine._qa_rag_params()
+        return {"success": True, "data": {"results": results[:10], "threshold": threshold}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"检索测试失败: {str(e)}")
+
+
+class QARagParamsIn(BaseModel):
+    sim_threshold: Optional[float] = None   # 0~1，None=不改
+    top_k: Optional[int] = None             # 1~20，None=不改
+
+
+@app.get("/ai-qa-settings/rag-params")
+def get_qa_rag_params(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """RAG 检索参数（全局，对所有账号生效）。"""
+    try:
+        from app.ai_reply_engine import ai_reply_engine
+        threshold, top_k = ai_reply_engine._qa_rag_params()
+        return {"success": True, "data": {"sim_threshold": threshold, "top_k": top_k}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取RAG参数失败: {str(e)}")
+
+
+@app.put("/ai-qa-settings/rag-params")
+def update_qa_rag_params(payload: QARagParamsIn,
+                         current_user: Dict[str, Any] = Depends(require_admin)):
+    """更新 RAG 检索参数。传 null 的字段保持不变。"""
+    try:
+        from app.db_manager import db_manager
+        if payload.sim_threshold is not None:
+            if not (0.0 <= payload.sim_threshold <= 1.0):
+                raise HTTPException(status_code=400, detail="相似度阈值需在 0~1 之间")
+            db_manager.set_system_setting('qa_sim_threshold', f"{payload.sim_threshold:.2f}",
+                                          "问答库RAG相似度阈值")
+        if payload.top_k is not None:
+            if not (1 <= payload.top_k <= 20):
+                raise HTTPException(status_code=400, detail="top_k 需在 1~20 之间")
+            db_manager.set_system_setting('qa_top_k', str(int(payload.top_k)),
+                                          "问答库RAG注入条数上限")
+        from app.ai_reply_engine import ai_reply_engine
+        threshold, top_k = ai_reply_engine._qa_rag_params()
+        return {"success": True, "message": "RAG 参数已更新",
+                "data": {"sim_threshold": threshold, "top_k": top_k}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新RAG参数失败: {str(e)}")
 
 
 class ProductVariantBindingIn(BaseModel):

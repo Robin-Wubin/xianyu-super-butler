@@ -232,6 +232,27 @@ class DBManager:
             ON ai_qa_pairs(cookie_id, item_id, enabled)
             ''')
 
+            # 问答向量索引表（RAG 本地语义检索）。
+            # embedding = float32 数组的 BLOB（bge-small-zh-v1.5，512 维），
+            # 索引文本 = 问题+回答拼接。问答增/改/启停时同步重索引；
+            # 表丢失或未索引时检索自动回退全量注入，不影响主流程。
+            self._execute_sql(cursor, '''
+            CREATE TABLE IF NOT EXISTS ai_qa_embeddings (
+                qa_id INTEGER PRIMARY KEY,
+                cookie_id TEXT NOT NULL,
+                item_id TEXT DEFAULT '',
+                embedding BLOB NOT NULL,
+                dim INTEGER NOT NULL DEFAULT 512,
+                model TEXT DEFAULT 'bge-small-zh-v1.5-int8',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (qa_id) REFERENCES ai_qa_pairs(id) ON DELETE CASCADE
+            )
+            ''')
+            self._execute_sql(cursor, '''
+            CREATE INDEX IF NOT EXISTS idx_ai_qa_embeddings_scope
+            ON ai_qa_embeddings(cookie_id, item_id)
+            ''')
+
             # 旧库迁移：商品级自动回复总开关（默认关——只对显式开启的商品回复）
             try:
                 self._execute_sql(cursor, "SELECT auto_reply_enabled FROM item_ai_configs LIMIT 1")
@@ -2717,6 +2738,137 @@ class DBManager:
                 return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"删除问答对失败: {e}")
+            return False
+
+    # ===== 问答向量索引（RAG 本地语义检索） =====
+
+    def get_qa_embedding(self, qa_id: int) -> Optional[bytes]:
+        """取某条问答的向量 BLOB，没有索引返回 None。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT embedding FROM ai_qa_embeddings WHERE qa_id = ?", (qa_id,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logger.error(f"获取问答向量失败: {e}")
+            return None
+
+    def get_qa_embeddings_for_account(self, cookie_id: str, item_id: Optional[str] = None) -> List[dict]:
+        """取账号（+商品范围）内全部已索引问答的向量。
+
+        item_id 为 None：返回该账号全部（通用+商品级）；
+        item_id 非空：返回商品专属 + 通用。
+        返回 [{qa_id, item_id, embedding(bytes), dim}, ...]
+        """
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                if item_id is None:
+                    cursor.execute('''
+                        SELECT qa_id, item_id, embedding, dim
+                        FROM ai_qa_embeddings WHERE cookie_id = ?
+                    ''', (cookie_id,))
+                else:
+                    cursor.execute('''
+                        SELECT qa_id, item_id, embedding, dim
+                        FROM ai_qa_embeddings
+                        WHERE cookie_id = ? AND item_id IN ('', ?)
+                    ''', (cookie_id, item_id))
+                rows = cursor.fetchall()
+            keys = ('qa_id', 'item_id', 'embedding', 'dim')
+            return [dict(zip(keys, r)) for r in rows]
+        except Exception as e:
+            logger.error(f"获取问答向量列表失败: {e}")
+            return []
+
+    def save_qa_embedding(self, qa_id: int, cookie_id: str, item_id: str,
+                          embedding: bytes, dim: int) -> bool:
+        """写入/覆盖某条问答的向量索引。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT INTO ai_qa_embeddings (qa_id, cookie_id, item_id, embedding, dim, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(qa_id) DO UPDATE SET
+                        cookie_id = excluded.cookie_id,
+                        item_id = excluded.item_id,
+                        embedding = excluded.embedding,
+                        dim = excluded.dim,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (qa_id, cookie_id, item_id or '', embedding, dim))
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"保存问答向量失败: {e}")
+            return False
+
+    def delete_qa_embedding(self, qa_id: int) -> bool:
+        """删除某条问答的向量索引。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM ai_qa_embeddings WHERE qa_id = ?", (qa_id,))
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"删除问答向量失败: {e}")
+            return False
+
+    def delete_qa_embeddings_by_account(self, cookie_id: str) -> bool:
+        """删除账号下全部向量索引（重建索引用）。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM ai_qa_embeddings WHERE cookie_id = ?", (cookie_id,))
+                self.conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"清空账号问答向量失败: {e}")
+            return False
+
+    def get_unindexed_qa_pairs(self, cookie_id: str) -> List[dict]:
+        """取账号下有 enabled=1 但缺向量索引的问答（重建/补索引用）。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    SELECT p.id, p.item_id, p.question, p.answer
+                    FROM ai_qa_pairs p
+                    LEFT JOIN ai_qa_embeddings e ON e.qa_id = p.id
+                    WHERE p.cookie_id = ? AND p.enabled = 1 AND e.qa_id IS NULL
+                ''', (cookie_id,))
+                rows = cursor.fetchall()
+            keys = ('id', 'item_id', 'question', 'answer')
+            return [dict(zip(keys, r)) for r in rows]
+        except Exception as e:
+            logger.error(f"查询未索引问答失败: {e}")
+            return []
+
+    def reindex_qa_embedding(self, qa_id: int, cookie_id: str) -> bool:
+        """为单条问答重建向量索引（问答内容变化后调用）。失败返回 False。"""
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT item_id, question, answer FROM ai_qa_pairs WHERE id = ? AND cookie_id = ?",
+                    (qa_id, cookie_id))
+                row = cursor.fetchone()
+            if not row:
+                return False
+            item_id, question, answer = row
+            from app import qa_embedder
+            if not qa_embedder.available():
+                return False
+            vector = qa_embedder.embed_one(f"{question}\n{answer}")
+            if vector is None:
+                return False
+            import struct
+            blob = struct.pack(f"<{len(vector)}f", *vector)
+            return self.save_qa_embedding(qa_id, cookie_id, item_id or '', blob, len(vector))
+        except Exception as e:
+            logger.error(f"重建问答向量失败 qa_id={qa_id}: {e}")
             return False
 
     def get_ai_reply_settings(self, cookie_id: str) -> dict:

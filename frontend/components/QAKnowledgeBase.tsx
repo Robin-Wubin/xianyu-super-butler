@@ -6,6 +6,8 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Search,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
@@ -16,9 +18,16 @@ import {
   getAccountDetails,
   getItems,
   getQAPairs,
+  getQARagParams,
+  getQARagStatus,
   QAPair,
+  QARagStatus,
+  QASearchResult,
+  rebuildQAIndex,
+  searchQA,
   toggleQAPair,
   updateQAPair,
+  updateQARagParams,
 } from '../services/api';
 import { confirmAction, notify } from '../services/feedback';
 import { EmptyState, SectionHeader } from './ui';
@@ -41,6 +50,17 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
   const [filterScope, setFilterScope] = useState<'all' | 'item' | 'global'>('all');
   const [edit, setEdit] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // RAG 状态与检索测试
+  const [ragStatus, setRagStatus] = useState<QARagStatus | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [testQuery, setTestQuery] = useState('');
+  const [testSearching, setTestSearching] = useState(false);
+  const [testResults, setTestResults] = useState<QASearchResult[] | null>(null);
+  const [testThreshold, setTestThreshold] = useState(0.45);
+  // RAG 参数（阈值/条数，全局）
+  const [ragParams, setRagParams] = useState<{ sim_threshold: number; top_k: number }>({ sim_threshold: 0.45, top_k: 5 });
+  const [savingParams, setSavingParams] = useState(false);
 
   useEffect(() => {
     if (accountId) {
@@ -75,6 +95,64 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
   }, [selectedAccount]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (!selectedAccount) return;
+    getQARagStatus(selectedAccount)
+      .then(setRagStatus)
+      .catch(() => setRagStatus(null));
+  }, [selectedAccount, pairs]);
+
+  useEffect(() => {
+    getQARagParams()
+      .then(setRagParams)
+      .catch(() => undefined);
+  }, []);
+
+  const handleSaveParams = async () => {
+    setSavingParams(true);
+    try {
+      const updated = await updateQARagParams({
+        sim_threshold: Number(ragParams.sim_threshold),
+        top_k: Number(ragParams.top_k),
+      });
+      setRagParams(updated);
+      notify('RAG 参数已更新', 'success');
+    } catch (error) {
+      notify(`保存参数失败：${(error as Error).message}`, 'error');
+    } finally {
+      setSavingParams(false);
+    }
+  };
+
+  const handleRebuild = async () => {
+    if (!selectedAccount) return;
+    setRebuilding(true);
+    try {
+      const res = await rebuildQAIndex(selectedAccount);
+      notify((res as { message?: string })?.message || '索引重建完成', 'success');
+      setRagStatus(await getQARagStatus(selectedAccount));
+    } catch (error) {
+      notify(`重建索引失败：${(error as Error).message}`, 'error');
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
+  const handleTestSearch = async () => {
+    if (!selectedAccount || !testQuery.trim()) return;
+    setTestSearching(true);
+    setTestResults(null);
+    try {
+      const data = await searchQA(selectedAccount, testQuery.trim());
+      setTestResults(data.results);
+      setTestThreshold(data.threshold);
+    } catch (error) {
+      notify(`检索失败：${(error as Error).message}`, 'error');
+    } finally {
+      setTestSearching(false);
+    }
+  };
 
   const itemTitle = useMemo(() => {
     const map = new Map(items.map((item) => [`${item.cookie_id}:${item.item_id}`, item]));
@@ -197,6 +275,145 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
             {label}
           </button>
         ))}
+      </div>
+
+      {/* RAG 语义检索状态与测试 */}
+      <div className="mb-4 rounded-md border border-[var(--border)] bg-[var(--surface-strong)] p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Sparkles className="h-3.5 w-3.5 text-[var(--brand)]" />
+            <span className="font-bold">语义检索（本地向量，RAG）</span>
+            {ragStatus ? (
+              ragStatus.model_available ? (
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-bold text-emerald-700">
+                  模型已就绪
+                </span>
+              ) : (
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-700">
+                  模型不可用 · 回退全量注入
+                </span>
+              )
+            ) : (
+              <span className="text-[var(--text-soft)]">加载中…</span>
+            )}
+            {ragStatus?.model_available && (
+              <span className="text-[var(--text-soft)]">
+                已索引 {ragStatus.indexed_count}/{ragStatus.enabled_count} 条启用问答
+                {ragStatus.indexed_count < ragStatus.enabled_count && '（缺索引的可在 AI 回复时自动回退）'}
+              </span>
+            )}
+          </div>
+          {ragStatus?.model_available && (
+            <button
+              type="button"
+              disabled={rebuilding}
+              onClick={() => void handleRebuild()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-[var(--surface)] px-2.5 py-1 text-xs font-bold text-[var(--text-muted)] hover:bg-[var(--surface-hover)] disabled:opacity-50"
+              title="全量重建向量索引"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${rebuilding ? 'animate-spin' : ''}`} />
+              重建索引
+            </button>
+          )}
+        </div>
+        {ragStatus?.model_available && (
+          <div className="mt-2.5 border-t border-[var(--border)] pt-2.5">
+            <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+              <label className="flex items-center gap-1.5" title="低于此分数的问答视为无关，不注入 AI 提示词。调高更严格、调低更宽松">
+                <span className="text-[var(--text-soft)]">相关度阈值</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={ragParams.sim_threshold}
+                  onChange={(event) => setRagParams({ ...ragParams, sim_threshold: Number(event.target.value) })}
+                  className="w-16 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5"
+                />
+              </label>
+              <label className="flex items-center gap-1.5" title="商品级/通用各自最多注入的问答条数">
+                <span className="text-[var(--text-soft)]">注入条数上限</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  step={1}
+                  value={ragParams.top_k}
+                  onChange={(event) => setRagParams({ ...ragParams, top_k: Number(event.target.value) })}
+                  className="w-14 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={savingParams}
+                onClick={() => void handleSaveParams()}
+                className="rounded bg-blue-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {savingParams ? '保存中…' : '保存'}
+              </button>
+              <span className="text-[11px] text-[var(--text-soft)]">
+                全局参数，对所有账号生效；阈值建议 0.45 左右
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-soft)]" />
+                <input
+                  value={testQuery}
+                  onChange={(event) => setTestQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void handleTestSearch();
+                  }}
+                  placeholder="模拟买家消息测试检索，如：能便宜点吗"
+                  className="w-full rounded-md border border-[var(--border)] bg-[var(--surface)] py-1.5 pl-8 pr-2 text-xs"
+                />
+              </div>
+              <button
+                type="button"
+                disabled={testSearching || !testQuery.trim()}
+                onClick={() => void handleTestSearch()}
+                className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {testSearching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                测试
+              </button>
+            </div>
+            {testResults && (
+              <div className="mt-2 space-y-1">
+                {testResults.length === 0 ? (
+                  <p className="text-xs text-[var(--text-soft)]">
+                    没有命中任何问答（低于相关度阈值 {testThreshold}）——AI 回复时也不会注入问答库。
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-[var(--text-soft)]">
+                      按相关度排序，分数 ≥ {testThreshold} 的问答会注入 AI 提示词（前 5 条商品级 + 前 5 条通用）：
+                    </p>
+                    {testResults.map((result) => (
+                      <div key={result.id} className="flex items-start gap-2 rounded bg-[var(--surface)] px-2 py-1.5">
+                        <span
+                          className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                            result.score >= testThreshold
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-[var(--surface-strong)] text-[var(--text-soft)]'
+                          }`}
+                        >
+                          {result.score.toFixed(3)}
+                        </span>
+                        <p className="min-w-0 flex-1 truncate text-xs text-[var(--text)]">
+                          {result.question.split('\n')[0]}
+                          <span className="ml-1 text-[10px] text-[var(--text-soft)]">
+                            {result.item_id ? `· ${itemTitle(result.item_id)}` : '· 通用'}
+                          </span>
+                        </p>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {edit && (
