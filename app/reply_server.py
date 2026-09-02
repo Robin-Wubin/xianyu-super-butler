@@ -5931,6 +5931,69 @@ def update_qa_rag_params(payload: QARagParamsIn,
         raise HTTPException(status_code=500, detail=f"更新RAG参数失败: {str(e)}")
 
 
+# ---- AI 预生成问答（基于商品详情，用户确认后入库） ----
+
+class QAGenerateIn(BaseModel):
+    item_id: str
+    count: int = Field(default=8, ge=1, le=15)
+
+
+@app.post("/ai-qa/{cookie_id}/generate")
+def generate_qa(cookie_id: str, payload: QAGenerateIn,
+                current_user: Dict[str, Any] = Depends(get_current_user)):
+    """基于商品详情用大模型预生成问答对（仅预览，不写库，等用户确认）。"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.ai_reply_engine import ai_reply_engine
+        pairs = ai_reply_engine.generate_qa_pairs(cookie_id, payload.item_id, payload.count)
+        return {"success": True, "message": f"已生成 {len(pairs)} 对候选问答",
+                "data": {"pairs": pairs}}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI生成问答失败: {str(e)}")
+
+
+class QABatchConfirmIn(BaseModel):
+    item_id: str = ""
+    pairs: List[Dict[str, str]] = Field(default_factory=list)
+
+
+@app.post("/ai-qa/{cookie_id}/generate/confirm")
+def confirm_generated_qa(cookie_id: str, payload: QABatchConfirmIn,
+                         current_user: Dict[str, Any] = Depends(get_current_user)):
+    """用户确认后批量入库 AI 生成的问答（source=ai_generated），并自动建向量索引。"""
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+        from app.db_manager import db_manager
+        saved, skipped = 0, 0
+        for p in payload.pairs:
+            q = str(p.get("question") or "").strip()
+            a = str(p.get("answer") or "").strip()
+            if not q or not a:
+                skipped += 1
+                continue
+            qa_id = db_manager.add_qa_pair(cookie_id, q, a,
+                                           item_id=payload.item_id or '',
+                                           source='ai_generated')
+            if qa_id:
+                # RAG：入库即建向量索引（模型缺失时静默跳过，检索回退全量）
+                db_manager.reindex_qa_embedding(qa_id, cookie_id)
+                saved += 1
+            else:
+                skipped += 1
+        msg = f"已收录 {saved} 对问答"
+        if skipped:
+            msg += f"（{skipped} 对无效已跳过）"
+        return {"success": True, "message": msg, "data": {"saved": saved, "skipped": skipped}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"收录生成问答失败: {str(e)}")
+
+
 class ProductVariantBindingIn(BaseModel):
     display_name: str = ""
     spec_text: str = ""

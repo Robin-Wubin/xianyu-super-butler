@@ -13,8 +13,11 @@ import {
 } from 'lucide-react';
 import { AccountDetail, Item } from '../types';
 import {
+  confirmGeneratedQA,
   createQAPair,
   deleteQAPair,
+  generateQAPairs,
+  GeneratedQAPair,
   getAccountDetails,
   getItems,
   getQAPairs,
@@ -61,6 +64,12 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
   // RAG 参数（阈值/条数，全局）
   const [ragParams, setRagParams] = useState<{ sim_threshold: number; top_k: number }>({ sim_threshold: 0.45, top_k: 5 });
   const [savingParams, setSavingParams] = useState(false);
+  // AI 预生成问答
+  const [genItemId, setGenItemId] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [genPairs, setGenPairs] = useState<GeneratedQAPair[] | null>(null);
+  const [genSelected, setGenSelected] = useState<Set<number>>(new Set());
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     if (accountId) {
@@ -122,6 +131,44 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
       notify(`保存参数失败：${(error as Error).message}`, 'error');
     } finally {
       setSavingParams(false);
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!selectedAccount || !genItemId) return;
+    setGenerating(true);
+    setGenPairs(null);
+    setGenSelected(new Set());
+    try {
+      const pairs = await generateQAPairs(selectedAccount, genItemId);
+      setGenPairs(pairs);
+      setGenSelected(new Set(pairs.map((_, idx) => idx)));
+      notify(`已生成 ${pairs.length} 对候选问答，请确认后收录`, 'success');
+    } catch (error) {
+      notify(`AI 生成失败：${(error as Error).message}`, 'error');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleConfirmGen = async () => {
+    if (!selectedAccount || !genPairs) return;
+    const picked = genPairs.filter((_, idx) => genSelected.has(idx));
+    if (picked.length === 0) {
+      notify('请至少勾选一对问答', 'error');
+      return;
+    }
+    setConfirming(true);
+    try {
+      const res = await confirmGeneratedQA(selectedAccount, genItemId, picked);
+      notify(`已收录 ${res.saved} 对问答${res.skipped ? `（${res.skipped} 对无效跳过）` : ''}`, 'success');
+      setGenPairs(null);
+      setGenSelected(new Set());
+      void load();
+    } catch (error) {
+      notify(`收录失败：${(error as Error).message}`, 'error');
+    } finally {
+      setConfirming(false);
     }
   };
 
@@ -354,6 +401,103 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
               <span className="text-[11px] text-[var(--text-soft)]">
                 全局参数，对所有账号生效；阈值建议 0.45 左右
               </span>
+            </div>
+            {/* AI 预生成问答 */}
+            <div className="mt-2.5 border-t border-[var(--border)] pt-2.5">
+              <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+                <span className="font-bold">AI 生成问答：</span>
+                <select
+                  value={genItemId}
+                  onChange={(event) => {
+                    setGenItemId(event.target.value);
+                    setGenPairs(null);
+                  }}
+                  className="max-w-56 flex-1 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1"
+                >
+                  <option value="">选择商品…</option>
+                  {accountItems.map((item) => (
+                    <option key={item.item_id} value={item.item_id}>
+                      {item.title?.slice(0, 22) || item.item_id}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={!genItemId || generating}
+                  onClick={() => void handleGenerate()}
+                  className="rounded bg-violet-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-violet-700 disabled:opacity-50"
+                >
+                  {generating ? '生成中…' : '基于商品详情生成'}
+                </button>
+                <span className="text-[11px] text-[var(--text-soft)]">
+                  用账号的 AI 配置预判买家问题，生成后勾选确认才入库
+                </span>
+              </div>
+              {genPairs && genPairs.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-1.5 text-[11px]">
+                      <input
+                        type="checkbox"
+                        checked={genSelected.size === genPairs.length}
+                        onChange={(event) => {
+                          setGenSelected(
+                            event.target.checked
+                              ? new Set(genPairs.map((_, idx) => idx))
+                              : new Set(),
+                          );
+                        }}
+                      />
+                      全选（已选 {genSelected.size}/{genPairs.length}）
+                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGenPairs(null);
+                          setGenSelected(new Set());
+                        }}
+                        className="rounded border border-[var(--border)] px-2.5 py-1 text-[11px] hover:bg-[var(--surface)]"
+                      >
+                        放弃
+                      </button>
+                      <button
+                        type="button"
+                        disabled={genSelected.size === 0 || confirming}
+                        onClick={() => void handleConfirmGen()}
+                        className="rounded bg-violet-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-violet-700 disabled:opacity-50"
+                      >
+                        {confirming ? '收录中…' : `收录选中的 ${genSelected.size} 对`}
+                      </button>
+                    </div>
+                  </div>
+                  {genPairs.map((pair, idx) => (
+                    <label
+                      key={idx}
+                      className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] p-2 hover:border-violet-400"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={genSelected.has(idx)}
+                        onChange={() => {
+                          const next = new Set(genSelected);
+                          if (next.has(idx)) {
+                            next.delete(idx);
+                          } else {
+                            next.add(idx);
+                          }
+                          setGenSelected(next);
+                        }}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-bold">问：{pair.question}</p>
+                        <p className="mt-0.5 text-xs text-[var(--text-soft)]">答：{pair.answer}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="flex gap-2">
               <div className="relative flex-1">

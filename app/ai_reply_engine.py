@@ -476,6 +476,79 @@ class AIReplyEngine:
         except Exception:
             return self.QA_SIM_THRESHOLD, self.QA_TOP_K
 
+    # AI 预生成问答：单次生成的目标条数（太多会稀释质量/超长）
+    QA_GEN_COUNT = 8
+
+    def generate_qa_pairs(self, cookie_id: str, item_id: str, count: int = 8) -> list:
+        """基于商品详情，用大模型预生成买家视角的常见问答对。
+
+        返回 [{question, answer}, ...]；失败抛异常（由 API 层转 5xx）。
+        生成结果只入库前经过用户确认，本方法不直接写库。
+        """
+        import re as _re
+        count = min(max(int(count or 8), 1), 15)
+        item = db_manager.get_item_info(cookie_id, item_id)
+        if not item:
+            raise ValueError(f"商品不存在或未同步详情: {item_id}")
+        title = item.get('item_title') or ''
+        price = item.get('item_price') or ''
+        detail = (item.get('item_detail') or '').strip()
+        if len(detail) > 3000:
+            detail = detail[:3000] + '…'
+        if not title and not detail:
+            raise ValueError("商品缺少标题与详情，无法生成")
+
+        settings = db_manager.get_ai_reply_settings(cookie_id)
+        existing = db_manager.get_qa_pairs(cookie_id, item_id or None, include_disabled=False)
+        existing_q = "\n".join(
+            f"- {p['question'].splitlines()[0][:60]}" for p in existing[:20]) or "（暂无）"
+
+        system = (
+            "你是闲鱼二手电商的资深卖家客服主管。根据商品信息，预判买家最可能问的问题，"
+            "并写出符合卖家立场的标准答案。\n"
+            "要求：\n"
+            "1. 问题必须是真实买家会问的口语（如「能便宜点吗」「是正品吗」「多久发货」），"
+            "站在买家视角措辞，不要客服腔；\n"
+            "2. 答案只能依据给定的商品事实（标题/价格/描述），不得编造规格、库存、"
+            "物流承诺或售后政策；描述里没有的信息不要猜；\n"
+            "3. 答案口语化、简短（一般 1~2 句），像真人卖家打字；\n"
+            "4. 覆盖不同角度：商品状况、价格/议价、发货物流、售后、验货等；\n"
+            "5. 已有问答库里的问题不要重复生成（列在下面）；\n"
+            f"6. 共生成 {count} 对。\n"
+            "严格按 JSON 数组输出，不要多余文字：\n"
+            '[{"question": "…", "answer": "…"}, …]'
+        )
+        user = (
+            f"商品标题：{title}\n"
+            f"商品价格：{price}\n"
+            f"商品描述：{detail or '（无）'}\n"
+            f"该商品已有的问答（避免重复）：\n{existing_q}"
+        )
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": user}]
+
+        raw = self._generate_with_retry(settings, messages, cookie_id)
+        if not raw:
+            raise RuntimeError("AI 未返回内容")
+        # 提取 JSON（容忍 markdown 代码块包裹）
+        m = _re.search(r'\[.*\]', raw, _re.S)
+        if not m:
+            raise ValueError(f"AI 返回格式异常: {raw[:120]}")
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"AI 返回 JSON 解析失败: {exc}") from exc
+        pairs = []
+        for it in data if isinstance(data, list) else []:
+            q = str(it.get('question') or '').strip()
+            a = str(it.get('answer') or '').strip()
+            if q and a:
+                pairs.append({"question": q[:500], "answer": a[:2000]})
+        if not pairs:
+            raise ValueError("AI 未生成有效问答对")
+        return pairs
+
+
     def _retrieve_qa_by_similarity(self, cookie_id: str, item_id: str,
                                    query_text: str,
                                    item_qa: list, global_qa: list):

@@ -940,6 +940,37 @@ export const updateQARagParams = async (params: Partial<QARagParams>): Promise<Q
     return (result as { data?: QARagParams })?.data || { sim_threshold: 0.45, top_k: 5 };
 }
 
+// ---- AI 预生成问答（基于商品详情，确认后入库） ----
+
+export interface GeneratedQAPair {
+    question: string;
+    answer: string;
+}
+
+export const generateQAPairs = async (
+    cookieId: string,
+    itemId: string,
+    count = 8,
+): Promise<GeneratedQAPair[]> => {
+    const result = await post<{ success: boolean; data: { pairs: GeneratedQAPair[] } }>(
+        `/ai-qa/${cookieId}/generate`,
+        { item_id: itemId, count },
+    );
+    return result?.data?.pairs || [];
+}
+
+export const confirmGeneratedQA = async (
+    cookieId: string,
+    itemId: string,
+    pairs: GeneratedQAPair[],
+): Promise<{ saved: number; skipped: number }> => {
+    const result = await post<ApiResponse & { data: { saved: number; skipped: number } }>(
+        `/ai-qa/${cookieId}/generate/confirm`,
+        { item_id: itemId, pairs },
+    );
+    return (result as { data?: { saved: number; skipped: number } })?.data || { saved: 0, skipped: 0 };
+}
+
 export const updateItemAIConfig = async (
     cookieId: string,
     itemId: string,
