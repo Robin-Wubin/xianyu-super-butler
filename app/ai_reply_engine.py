@@ -548,6 +548,132 @@ class AIReplyEngine:
             raise ValueError("AI 未生成有效问答对")
         return pairs
 
+    def generate_qa_pairs_stream(self, cookie_id: str, item_id: str, count: int = 8):
+        """流式版 generate_qa_pairs，供 SSE 端点使用。
+
+        OpenAI 兼容配置走 stream=True：逐段产出 {"type":"delta","text":…}，
+        带思考的模型生成再久也不会撞读超时（连接上持续有数据流动）。
+        流结束后解析 JSON，产出 {"type":"done","pairs":[…]}。
+
+        DashScope（百炼应用）/Gemini 没有可复用的流式对话路径，退化为
+        整段推送：先发 notice 提示较慢，再等完整结果，产出同样的 done 事件。
+
+        解析失败（典型：推理模型把 max_tokens 额度吃光，正文被截断）时，
+        额度放大 3 倍重试一次，重试过程同样实时推送。
+        """
+        count = min(max(int(count or 8), 1), 15)
+        settings = db_manager.get_ai_reply_settings(cookie_id)
+
+        def _build_messages(cur_count: int):
+            item = db_manager.get_item_info(cookie_id, item_id)
+            if not item:
+                raise ValueError(f"商品不存在或未同步详情: {item_id}")
+            title = item.get('item_title') or ''
+            price = item.get('item_price') or ''
+            detail = (item.get('item_detail') or '').strip()
+            if len(detail) > 3000:
+                detail = detail[:3000] + '…'
+            if not title and not detail:
+                raise ValueError("商品缺少标题与详情，无法生成")
+            existing = db_manager.get_qa_pairs(cookie_id, item_id or None, include_disabled=False)
+            existing_q = "\n".join(
+                f"- {p['question'].splitlines()[0][:60]}" for p in existing[:20]) or "（暂无）"
+            system = (
+                "你是闲鱼二手电商的资深卖家客服主管。根据商品信息，预判买家最可能问的问题，"
+                "并写出符合卖家立场的标准答案。\n"
+                "要求：\n"
+                "1. 问题必须是真实买家会问的口语（如「能便宜点吗」「是正品吗」「多久发货」），"
+                "站在买家视角措辞，不要客服腔；\n"
+                "2. 答案只能依据给定的商品事实（标题/价格/描述），不得编造规格、库存、"
+                "物流承诺或售后政策；描述里没有的信息不要猜；\n"
+                "3. 答案口语化、简短（一般 1~2 句），像真人卖家打字；\n"
+                "4. 覆盖不同角度：商品状况、价格/议价、发货物流、售后、验货等；\n"
+                "5. 已有问答库里的问题不要重复生成（列在下面）；\n"
+                f"6. 共生成 {cur_count} 对。\n"
+                "严格按 JSON 数组输出，不要多余文字：\n"
+                '[{"question": "…", "answer": "…"}, …]'
+            )
+            user = (
+                f"商品标题：{title}\n"
+                f"商品价格：{price}\n"
+                f"商品描述：{detail or '（无）'}\n"
+                f"该商品已有的问答（避免重复）：\n{existing_q}"
+            )
+            return [{"role": "system", "content": system},
+                    {"role": "user", "content": user}]
+
+        def _parse_pairs(raw: str):
+            m = re.search(r'\[.*\]', raw, re.S)
+            if not m:
+                return None
+            try:
+                data = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                return None
+            pairs = []
+            for it in data if isinstance(data, list) else []:
+                q = str(it.get('question') or '').strip()
+                a = str(it.get('answer') or '').strip()
+                if q and a:
+                    pairs.append({"question": q[:500], "answer": a[:2000]})
+            return pairs or None
+
+        if self._is_dashscope_api(settings) or self._is_gemini_api(settings):
+            yield {"type": "notice",
+                   "message": "当前 AI 配置不支持流式输出，生成较慢（约1~2分钟），请耐心等待"}
+            raw = self._generate_with_retry(settings, _build_messages(count), cookie_id)
+            if not raw:
+                raise RuntimeError("AI 未返回内容")
+            pairs = _parse_pairs(raw)
+            if pairs is None:
+                raise ValueError("AI 返回 JSON 解析失败")
+            yield {"type": "done", "pairs": pairs}
+            return
+
+        # OpenAI 兼容：流式调用。读超时放宽到 10 分钟（思考模型首 token 可能很慢），
+        # 但因为有增量数据流动，正常情况远用不到。
+        budget = self._resolve_max_tokens(settings)
+        for attempt in (1, 2):
+            messages = _build_messages(count)
+            yield {"type": "status",
+                   "message": f"正在生成（第 {attempt} 轮，预算 {budget}）…"}
+            collected = []
+            try:
+                client = OpenAI(
+                    api_key=settings['api_key'],
+                    base_url=settings['base_url'],
+                    timeout=600.0,
+                    max_retries=1,
+                )
+                stream = client.chat.completions.create(
+                    model=settings['model_name'],
+                    messages=messages,
+                    max_tokens=budget,
+                    temperature=0.7,
+                    stream=True,
+                )
+                for chunk in stream:
+                    if not getattr(chunk, 'choices', None):
+                        continue
+                    delta = chunk.choices[0].delta
+                    piece = getattr(delta, 'content', None)
+                    # 只推正文；reasoning_content 是思维链，不推给前端
+                    if piece:
+                        collected.append(piece)
+                        yield {"type": "delta", "text": piece}
+            except Exception as exc:
+                logger.error(f"流式生成问答失败: {type(exc).__name__} {exc}")
+                yield {"type": "error", "message": f"AI 调用失败: {exc}"}
+                return
+            raw = "".join(collected).strip()
+            pairs = _parse_pairs(raw)
+            if pairs is not None:
+                yield {"type": "done", "pairs": pairs}
+                return
+            if attempt == 1:
+                budget = min(budget * 3, self.MAX_TOKENS_CEILING)
+                yield {"type": "notice", "message": "输出被截断，正在加大额度重试…"}
+        yield {"type": "error", "message": "AI 返回 JSON 解析失败，请重试或减少生成条数"}
 
     def _retrieve_qa_by_similarity(self, cookie_id: str, item_id: str,
                                    query_text: str,

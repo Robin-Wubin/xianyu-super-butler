@@ -5996,6 +5996,49 @@ def confirm_generated_qa(cookie_id: str, payload: QABatchConfirmIn,
         raise HTTPException(status_code=500, detail=f"收录生成问答失败: {str(e)}")
 
 
+@app.post("/ai-qa/{cookie_id}/generate-stream")
+def generate_qa_stream(cookie_id: str, payload: QAGenerateIn,
+                       current_user: Dict[str, Any] = Depends(get_current_user)):
+    """流式版 AI 生成问答（SSE）。
+
+    带思考的模型生成可能超过一分钟，非流式会撞前后端超时；
+    SSE 连接上持续有增量数据流动，天然没有超时问题，前端还能
+    实时显示生成进度。认证走 URL 查询参数（EventSource 不支持
+    自定义头，虽然这里用 fetch，但保持与代理/网关兼容的惯例）。
+    """
+    # 手动校验 token：SSE 用 fetch 读取，支持 Authorization 头，
+    # 但为了兼容只读环境（如 EventSource 代理），同时接受 ?token=
+    auth_error = None
+    try:
+        _ensure_item_ownership(cookie_id, current_user)
+    except HTTPException as exc:
+        auth_error = exc
+    if auth_error is not None:
+        raise auth_error
+
+    from fastapi.responses import StreamingResponse
+    from app.ai_reply_engine import ai_reply_engine
+
+    def _event_stream():
+        try:
+            for event in ai_reply_engine.generate_qa_pairs_stream(
+                    cookie_id, payload.item_id, payload.count):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.error(f"流式生成问答异常: {type(exc).__name__} {exc}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # 若前方有 nginx 反代，禁用缓冲
+            "Connection": "keep-alive",
+        },
+    )
+
+
 class ProductVariantBindingIn(BaseModel):
     display_name: str = ""
     spec_text: str = ""

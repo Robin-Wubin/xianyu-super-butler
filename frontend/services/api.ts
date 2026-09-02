@@ -971,6 +971,55 @@ export const confirmGeneratedQA = async (
     return (result as { data?: { saved: number; skipped: number } })?.data || { saved: 0, skipped: 0 };
 }
 
+// 流式 AI 生成问答（SSE over fetch）：带思考的模型生成可能超过一分钟，
+// axios 30s 超时会直接失败；fetch 流式读取连接上持续有数据流动，没有超时问题。
+export const generateQAPairsStream = async (
+    cookieId: string,
+    itemId: string,
+    count: number,
+    onEvent: (event:
+        | { type: 'status' | 'notice'; message: string }
+        | { type: 'delta'; text: string }
+        | { type: 'done'; pairs: GeneratedQAPair[] }
+        | { type: 'error'; message: string }) => void,
+): Promise<void> => {
+    const token = localStorage.getItem('auth_token');
+    const response = await fetch(`/ai-qa/${encodeURIComponent(cookieId)}/generate-stream`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ item_id: itemId, count }),
+    });
+    if (!response.ok || !response.body) {
+        let detail = `HTTP ${response.status}`;
+        try {
+            const err = await response.json();
+            detail = err?.detail || detail;
+        } catch { /* 非 JSON 错误体 */ }
+        throw new Error(detail);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE 事件以空行分隔
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+            const line = part.split('\n').find((l) => l.startsWith('data: '));
+            if (!line) continue;
+            try {
+                onEvent(JSON.parse(line.slice(6)));
+            } catch { /* 忽略无法解析的片段 */ }
+        }
+    }
+}
+
 export const updateItemAIConfig = async (
     cookieId: string,
     itemId: string,

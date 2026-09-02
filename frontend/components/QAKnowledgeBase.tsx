@@ -16,7 +16,7 @@ import {
   confirmGeneratedQA,
   createQAPair,
   deleteQAPair,
-  generateQAPairs,
+  generateQAPairsStream,
   GeneratedQAPair,
   getAccountDetails,
   getItems,
@@ -66,7 +66,10 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
   const [savingParams, setSavingParams] = useState(false);
   // AI 预生成问答
   const [genItemId, setGenItemId] = useState('');
+  const [genCount, setGenCount] = useState(8);
   const [generating, setGenerating] = useState(false);
+  const [genStatus, setGenStatus] = useState('');
+  const [genRaw, setGenRaw] = useState('');
   const [genPairs, setGenPairs] = useState<GeneratedQAPair[] | null>(null);
   const [genSelected, setGenSelected] = useState<Set<number>>(new Set());
   const [confirming, setConfirming] = useState(false);
@@ -145,15 +148,30 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
     setGenerating(true);
     setGenPairs(null);
     setGenSelected(new Set());
+    setGenStatus('连接 AI…');
+    setGenRaw('');
     try {
-      const pairs = await generateQAPairs(selectedAccount, genItemId);
-      setGenPairs(pairs);
-      setGenSelected(new Set(pairs.map((_, idx) => idx)));
-      notify(`已生成 ${pairs.length} 对候选问答，请确认后收录`, 'success');
+      await generateQAPairsStream(selectedAccount, genItemId, genCount, (event) => {
+        if (event.type === 'status' || event.type === 'notice') {
+          setGenStatus(event.message);
+        } else if (event.type === 'delta') {
+          setGenRaw((prev) => prev + event.text);
+          setGenStatus(`正在生成… 已输出 ${event.text.length} 字`);
+        } else if (event.type === 'done') {
+          setGenPairs(event.pairs);
+          setGenSelected(new Set(event.pairs.map((_, idx) => idx)));
+          setGenStatus('');
+          notify(`已生成 ${event.pairs.length} 对候选问答，请确认后收录`, 'success');
+        } else if (event.type === 'error') {
+          setGenStatus('');
+          notify(`AI 生成失败：${event.message}`, 'error');
+        }
+      });
     } catch (error) {
       notify(`AI 生成失败：${(error as Error).message}`, 'error');
     } finally {
       setGenerating(false);
+      setGenStatus('');
     }
   };
 
@@ -432,6 +450,16 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
                     </option>
                   ))}
                 </select>
+                <select
+                  value={genCount}
+                  onChange={(event) => setGenCount(Number(event.target.value))}
+                  className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1"
+                  title="生成条数"
+                >
+                  {[5, 8, 10, 15].map((n) => (
+                    <option key={n} value={n}>{n} 对</option>
+                  ))}
+                </select>
                 <button
                   type="button"
                   disabled={!genItemId || generating}
@@ -441,9 +469,16 @@ const QAKnowledgeBase: React.FC<{ accountId?: string }> = ({ accountId }) => {
                   {generating ? '生成中…' : '基于商品详情生成'}
                 </button>
                 <span className="text-[11px] text-[var(--text-soft)]">
-                  用账号的 AI 配置预判买家问题，生成后勾选确认才入库
+                  {generating
+                    ? genStatus || '正在生成…'
+                    : '用账号的 AI 配置预判买家问题，生成后勾选确认才入库'}
                 </span>
               </div>
+              {generating && genRaw && (
+                <pre className="mb-1.5 max-h-24 overflow-y-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--bg)] p-1.5 text-[10px] leading-relaxed text-[var(--text-soft)]">
+                  {genRaw}
+                </pre>
+              )}
               {genPairs && genPairs.length > 0 && (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
